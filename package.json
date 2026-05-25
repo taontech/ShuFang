@@ -1,0 +1,20 @@
+{
+  "name": "shufang",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @shufang/web",
+    "dev:web": "npm run dev -w @shufang/web",
+    "dev:server": "npm run dev -w @shufang/server",
+    "build": "npm run build -w @shufang/web && npm run build -w @shufang/server",
+    "typecheck": "npm run typecheck -w @shufang/web && npm run typecheck -w @shufang/server"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

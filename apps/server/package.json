@@ -1,0 +1,26 @@
+{
+  "name": "@shufang/server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@fastify/static": "^7.0.4",
+    "better-sqlite3": "^11.1.2",
+    "chokidar": "^3.6.0",
+    "fast-xml-parser": "^5.8.0",
+    "fastify": "^4.28.1",
+    "jszip": "^3.10.1",
+    "music-metadata": "^10.5.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.5.4",
+    "tsx": "^4.16.2"
+  }
+}
