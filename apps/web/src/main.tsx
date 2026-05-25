@@ -34,7 +34,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { AmbientParticles } from "./components/AmbientParticles";
 import "./styles/app.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:4141";
+const API_BASE = resolveApiBase();
 
 type View = "home" | "books" | "reader" | "music" | "podcasts" | "settings";
 type Theme = "night" | "day";
@@ -928,6 +928,14 @@ function coverBackground(path: string | null | undefined) {
 
 function assetUrl(path: string) {
   return path.startsWith("http") ? path : `${API_BASE}${path}`;
+}
+
+function resolveApiBase() {
+  const configured = import.meta.env.VITE_API_BASE as string | undefined;
+  if (configured) return configured.replace(/\/$/, "");
+  if (typeof window === "undefined") return "http://localhost:4141";
+  const { protocol, hostname } = window.location;
+  return `${protocol}//${hostname}:4141`;
 }
 
 function formatDuration(duration: number | null) {
