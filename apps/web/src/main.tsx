@@ -31,7 +31,9 @@ import {
   Sun,
   Timer,
   Trash2,
-  UserRound
+  UserRound,
+  Plus,
+  X
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import "./styles/app.css";
@@ -113,7 +115,11 @@ function App() {
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [readingActivity, setReadingActivity] = useState<ReadingActivity[]>([]);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
-  const [activeUserId, setActiveUserId] = useState("u-1");
+  const [activeUserId, setActiveUserId] = useState(() => {
+    return localStorage.getItem("shufang.activeUserId") || "";
+  });
+  const [isReaderOpen, setIsReaderOpen] = useState(false);
+  const [isUserModalOpen, setIsUserModalOpen] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<AudioTrack | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playMode, setPlayMode] = useState<PlayMode>("repeat-all");
@@ -129,19 +135,32 @@ function App() {
   const returningFromReaderRef = useRef(false);
 
   const activeBook = useMemo(
-    () => books.find((book) => book.id === activeBookId) ?? books[0] ?? null,
+    () => books.find((book) => book.id === activeBookId) ?? null,
     [activeBookId, books]
   );
   const activeUser = users.find((user) => user.id === activeUserId) ?? users[0] ?? {
-    id: "u-1",
-    name: "陶宁",
-    avatar: "T",
-    role: "admin"
+    id: "",
+    name: "访客",
+    avatar: "👤",
+    role: "member"
   };
 
   useEffect(() => {
-    void refreshAll(activeUserId);
+    if (activeUserId) {
+      localStorage.setItem("shufang.activeUserId", activeUserId);
+      void refreshAll(activeUserId);
+    } else {
+      api<User[]>("/api/users").then(setUsers).catch(console.error);
+    }
   }, [activeUserId]);
+
+  useEffect(() => {
+    if (users.length > 0) {
+      if (!activeUserId || !users.some((user) => user.id === activeUserId)) {
+        setIsUserModalOpen(true);
+      }
+    }
+  }, [users, activeUserId]);
 
   useEffect(() => {
     if (!activeBookId && books.length > 0) {
@@ -203,11 +222,8 @@ function App() {
   };
 
   const openBook = (bookId: string) => {
-    if (view !== "reader") {
-      previousViewRef.current = view;
-    }
     setActiveBookId(bookId);
-    setView("reader");
+    setIsReaderOpen(true);
   };
 
   const updateBookProgress = (bookId: string, cfi: string, progress: number, chapterTitle: string) => {
@@ -317,9 +333,19 @@ function App() {
     <div className="app-shell" data-theme={theme} data-view={view}>
       <aside className="sidebar" aria-label="主导航">
         <div className="brand">
-          <div className="brand-mark">
-            <Sparkles size={20} />
-          </div>
+          <button
+            className="brand-mark brand-mark-btn"
+            onClick={() => setIsUserModalOpen(true)}
+            aria-label="切换用户"
+            title="切换用户"
+            style={{ cursor: "pointer", transition: "transform 0.16s, border-color 0.16s", outline: "none" }}
+          >
+            {activeUser.avatar ? (
+              <span style={{ fontSize: "18px", lineHeight: 1 }}>{activeUser.avatar}</span>
+            ) : (
+              <UserRound size={18} />
+            )}
+          </button>
           <div>
             <strong>书房</strong>
             <span>shufang.local</span>
@@ -335,11 +361,11 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <button className="user-chip" onClick={() => setActiveUserId(nextUserId(activeUserId, users))}>
+          <button className="user-chip" onClick={() => setIsUserModalOpen(true)}>
             <span>{activeUser.avatar}</span>
             <div>
               <strong>{activeUser.name}</strong>
-              <small>个人进度与书签</small>
+              <small>切换/管理用户</small>
             </div>
           </button>
           <button className="icon-button" onClick={() => setTheme(theme === "night" ? "day" : "night")} aria-label="切换主题">
@@ -372,21 +398,6 @@ function App() {
               />
             )}
             {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => setView("settings")} onCoverExtracted={updateBookCover} />}
-            {view === "reader" && activeBook && (
-              <ReaderView
-                book={activeBook}
-                user={activeUser}
-                theme={theme}
-                setTheme={setTheme}
-                onBack={() => {
-                  returningFromReaderRef.current = true;
-                  setView(previousViewRef.current);
-                }}
-                onProgressSaved={updateBookProgress}
-                onReadingTick={addReadingSeconds}
-              />
-            )}
-            {view === "reader" && !activeBook && <EmptyLibrary goSettings={() => setView("settings")} />}
             {view === "music" && <AudioView kind="music" tracks={music} playTrack={playTrack} />}
             {view === "podcasts" && <AudioView kind="podcasts" tracks={podcasts} playTrack={playTrack} />}
             {view === "settings" && (
@@ -419,6 +430,43 @@ function App() {
         seek={seekAudio}
         activeLyric={currentLyricText}
       />
+      <AnimatePresence>
+        {isReaderOpen && activeBook && (
+          <ReaderView
+            book={activeBook}
+            user={activeUser}
+            theme={theme}
+            setTheme={setTheme}
+            onBack={async () => {
+              setIsReaderOpen(false);
+              await refreshReadingActivity(activeUserId);
+            }}
+            onProgressSaved={updateBookProgress}
+            onReadingTick={addReadingSeconds}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {isUserModalOpen && (
+          <UserModal
+            users={users}
+            activeUserId={activeUserId}
+            onSelectUser={(userId) => {
+              setActiveUserId(userId);
+              setIsUserModalOpen(false);
+            }}
+            onClose={() => {
+              if (activeUserId && users.some((u) => u.id === activeUserId)) {
+                setIsUserModalOpen(false);
+              }
+            }}
+            refreshUsers={async () => {
+              const nextUsers = await api<User[]>("/api/users");
+              setUsers(nextUsers);
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -509,7 +557,7 @@ function HomeView({
 
       <section className="audio-panel">
         <SectionTitle icon={<ListMusic size={18} />} title="正在收听" actionLabel="更多" onAction={goMusic} />
-        <TrackList tracks={tracks.slice(0, 4)} playTrack={playTrack} />
+        <TrackList tracks={tracks.slice(0, 20)} playTrack={playTrack} />
       </section>
     </div>
   );
@@ -521,8 +569,20 @@ function ReadingCalendar({ activity }: { activity: ReadingActivity[] }) {
   const activityByDay = new Map(activity.map((item) => [item.day, item.seconds]));
   const weeks = calendarWeeks(weekCount);
   const monthLabels = weeks.map((week, index) => {
-    const labelDate = week.find((date, dayIndex) => Boolean(date) && ((index === 0 && dayIndex === 0) || date?.getDate() === 1));
-    return labelDate ? labelDate.toLocaleDateString(undefined, { month: "short" }) : "";
+    const firstDate = week.find((date) => date !== null);
+    if (!firstDate) return "";
+
+    if (index === 0) {
+      return firstDate.toLocaleDateString(undefined, { month: "short" });
+    }
+
+    const prevWeek = weeks[index - 1];
+    const prevDate = prevWeek ? prevWeek.find((date) => date !== null) : null;
+    if (prevDate && firstDate.getMonth() !== prevDate.getMonth()) {
+      return firstDate.toLocaleDateString(undefined, { month: "short" });
+    }
+
+    return "";
   });
 
   useEffect(() => {
@@ -930,6 +990,9 @@ function ReaderView({
         <a className="icon-button" href={`${API_BASE}/api/books/${book.id}/file`} download aria-label="下载" title="下载">
           <Download size={18} />
         </a>
+        <button className="icon-button close-btn" onClick={onBack} aria-label="关闭" title="关闭" style={{ marginLeft: "auto" }}>
+          <X size={18} />
+        </button>
       </div>
 
       <div
@@ -997,7 +1060,7 @@ function ReaderView({
             </div>
           )}
           {isPdf ? (
-            <PdfReader src={`${API_BASE}/api/books/${book.id}/file`} title={book.title} />
+            <PdfReader book={book} user={user} onProgressSaved={onProgressSaved} />
           ) : (
             <>
               <div ref={hostRef} className="epub-host" />
@@ -1037,18 +1100,35 @@ function ReaderDrawer({ title, icon, children }: { title: string; icon: React.Re
   );
 }
 
-function PdfReader({ src, title }: { src: string; title: string }) {
+function PdfReader({
+  book,
+  user,
+  onProgressSaved
+}: {
+  book: BookItem;
+  user: User;
+  onProgressSaved: (bookId: string, cfi: string, progress: number, chapterTitle: string) => void;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const pdfRef = useRef<any>(null);
   const [pageCount, setPageCount] = useState(0);
   const [layoutVersion, setLayoutVersion] = useState(0);
   const [error, setError] = useState("");
 
+  const src = `${API_BASE}/api/books/${book.id}/file`;
+  const title = book.title;
+
+  const lastSavedPageRef = useRef<number>(0);
+  const saveTimerRef = useRef<number | null>(null);
+  const isScrollingToSavedRef = useRef<boolean>(false);
+
   useEffect(() => {
     let disposed = false;
     setPageCount(0);
     setError("");
     pdfRef.current = null;
+    lastSavedPageRef.current = 0;
+    isScrollingToSavedRef.current = false;
 
     const loadingTask = pdfjsLib.getDocument(src);
     void loadingTask.promise
@@ -1069,8 +1149,32 @@ function PdfReader({ src, title }: { src: string; title: string }) {
       loadingTask.destroy();
       void pdfRef.current?.destroy();
       pdfRef.current = null;
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     };
   }, [src]);
+
+  // Scroll to the last read page once the PDF is loaded
+  useEffect(() => {
+    if (pageCount > 0 && book.cfi && containerRef.current) {
+      const match = book.cfi.match(/page-(\d+)/);
+      if (match) {
+        const savedPage = parseInt(match[1], 10);
+        if (savedPage > 1 && savedPage <= pageCount) {
+          isScrollingToSavedRef.current = true;
+          setTimeout(() => {
+            const el = document.getElementById(`pdf-page-${savedPage}`);
+            if (el) {
+              el.scrollIntoView({ block: "start" });
+              lastSavedPageRef.current = savedPage;
+            }
+            setTimeout(() => {
+              isScrollingToSavedRef.current = false;
+            }, 300);
+          }, 150);
+        }
+      }
+    }
+  }, [pageCount, book.id]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1079,6 +1183,52 @@ function PdfReader({ src, title }: { src: string; title: string }) {
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
+
+  // Listen to scrolling to track and save current page progress
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || pageCount === 0) return;
+
+    const handleScroll = () => {
+      if (isScrollingToSavedRef.current) return;
+
+      const children = container.getElementsByClassName("pdf-page");
+      let activePageNum = 1;
+      let minDiff = Infinity;
+      const containerCenter = container.scrollTop + container.clientHeight / 2;
+
+      for (let i = 0; i < children.length; i++) {
+        const el = children[i] as HTMLElement;
+        const elCenter = el.offsetTop + el.clientHeight / 2;
+        const diff = Math.abs(containerCenter - elCenter);
+        if (diff < minDiff) {
+          minDiff = diff;
+          const pageIdMatch = el.id.match(/pdf-page-(\d+)/);
+          if (pageIdMatch) {
+            activePageNum = parseInt(pageIdMatch[1], 10);
+          }
+        }
+      }
+
+      if (activePageNum !== lastSavedPageRef.current) {
+        lastSavedPageRef.current = activePageNum;
+        if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = window.setTimeout(() => {
+          const percentage = Math.round((activePageNum / pageCount) * 100);
+          const chapter = `第 ${activePageNum} 页`;
+          const cfi = `page-${activePageNum}`;
+          void saveProgress(book.id, user.id, cfi, percentage, chapter).then(() => {
+            onProgressSaved(book.id, cfi, percentage, chapter);
+          });
+        }, 1000);
+      }
+    };
+
+    container.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", handleScroll);
+    };
+  }, [pageCount, book.id, user.id, onProgressSaved]);
 
   if (error) {
     return (
@@ -1176,7 +1326,7 @@ function PdfPageCanvas({
   }, [containerRef, isVisible, layoutVersion, pageNumber, pdfDocument]);
 
   return (
-    <div className="pdf-page" aria-label={`第 ${pageNumber} 页`}>
+    <div className="pdf-page" id={`pdf-page-${pageNumber}`} aria-label={`第 ${pageNumber} 页`}>
       <canvas ref={canvasRef} />
     </div>
   );
@@ -1756,7 +1906,170 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   }
   return response.json() as Promise<T>;
 }
+function UserModal({
+  users,
+  activeUserId,
+  onSelectUser,
+  onClose,
+  refreshUsers
+}: {
+  users: User[];
+  activeUserId: string;
+  onSelectUser: (userId: string) => void;
+  onClose: () => void;
+  refreshUsers: () => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState("");
 
+  const emojis = ['🐱', '🐶', '🦊', '🐨', '🐼', '🦁', '🦉', '🦄', '🌟', '🍀', '🚀', '🎨', '📚', '🎵', '🎧', '👾', '🧁', '🍦', '🍩', '🍕'];
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setError("名称不能为空");
+      return;
+    }
+    try {
+      const randomAvatar = emojis[Math.floor(Math.random() * emojis.length)];
+      const newUser = await api<User>("/api/users", {
+        method: "POST",
+        body: JSON.stringify({ name: trimmedName, avatar: randomAvatar })
+      });
+      await refreshUsers();
+      setName("");
+      setIsCreating(false);
+      onSelectUser(newUser.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDeleteUser = async (userId: string, userName: string) => {
+    const confirmed = window.confirm(`确定要删除用户 "${userName}" 吗？\n\n注意：删除后仅在此处不显示。如果以后重新新建相同名字的用户，所有的阅读记录与进度数据都会完好保留。`);
+    if (!confirmed) return;
+
+    try {
+      await api(`/api/users/${userId}`, { method: "DELETE" });
+      await refreshUsers();
+      if (userId === activeUserId) {
+        onSelectUser("");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const showClose = activeUserId && users.some((u) => u.id === activeUserId);
+
+  return (
+    <div className="user-modal-overlay">
+      <motion.div
+        className="user-modal-card"
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        transition={{ duration: 0.24 }}
+      >
+        <div className="user-modal-header">
+          <h2>{users.length === 0 ? "欢迎来到书房" : "切换/管理用户"}</h2>
+          {showClose && (
+            <button className="icon-button close-btn" onClick={onClose} aria-label="关闭">
+              <X size={18} />
+            </button>
+          )}
+        </div>
+
+        {users.length === 0 ? (
+          <div className="user-modal-welcome">
+            <p className="welcome-desc">这是您第一次在此设备上打开书房，或者系统中尚无用户。请先创建一个成员账号开始使用：</p>
+            <form onSubmit={handleSubmit} className="user-create-inline">
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="输入您的名字，例如：小明"
+                autoFocus
+              />
+              <button type="submit" className="primary-action">
+                创建并开始
+              </button>
+            </form>
+            {error && <p className="error-copy">{error}</p>}
+          </div>
+        ) : (
+          <div className="user-modal-body">
+            {!isCreating ? (
+              <>
+                <p className="section-label">请选择当前使用者：</p>
+                <div className="user-grid">
+                  {users.map((u) => (
+                    <div
+                      key={u.id}
+                      className={`user-select-item ${u.id === activeUserId ? "active" : ""}`}
+                      onClick={() => onSelectUser(u.id)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          onSelectUser(u.id);
+                        }
+                      }}
+                    >
+                      <button
+                        className="user-delete-btn"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteUser(u.id, u.name);
+                        }}
+                        aria-label={`删除用户 ${u.name}`}
+                        title="删除用户"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                      <span className="user-avatar">{u.avatar}</span>
+                      <span className="user-name">{u.name}</span>
+                      {u.id === activeUserId && <span className="active-indicator">当前</span>}
+                    </div>
+                  ))}
+                  <button className="user-select-item create-btn" onClick={() => setIsCreating(true)}>
+                    <span className="user-avatar plus"><Plus size={18} /></span>
+                    <span className="user-name">新建用户</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="user-create-pane">
+                <p className="section-label">创建新成员：</p>
+                <form onSubmit={handleSubmit} className="user-create-form">
+                  <div className="input-group">
+                    <input
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="输入新成员的名字..."
+                      autoFocus
+                    />
+                  </div>
+                  {error && <p className="error-copy">{error}</p>}
+                  <div className="btn-group">
+                    <button type="button" className="ghost-action" onClick={() => { setIsCreating(false); setError(""); setName(""); }}>
+                      取消
+                    </button>
+                    <button type="submit" className="primary-action">
+                      确认创建
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+          </div>
+        )}
+      </motion.div>
+    </div>
+  );
+}
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

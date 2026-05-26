@@ -108,6 +108,7 @@ function migrate(db: Database.Database) {
   addColumn(db, "books", "description", "TEXT");
   addColumn(db, "books", "file_type", "TEXT NOT NULL DEFAULT 'epub'");
   addColumn(db, "scan_roots", "last_scanned_at", "TEXT");
+  addColumn(db, "users", "enabled", "INTEGER NOT NULL DEFAULT 1");
 }
 
 function seed(db: Database.Database) {

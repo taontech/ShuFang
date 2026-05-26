@@ -48,7 +48,41 @@ app.get("/api/library/summary", async () => ({
 }));
 
 app.get("/api/users", async () => {
-  return db.prepare("SELECT id, name, avatar, role FROM users ORDER BY created_at").all();
+  return db.prepare("SELECT id, name, avatar, role FROM users WHERE enabled = 1 ORDER BY created_at").all();
+});
+
+app.post<{
+  Body: { name: string; avatar: string };
+}>("/api/users", async (request) => {
+  const { name, avatar } = request.body;
+
+  // Check if a user with the same name already exists in the database
+  const existing = db.prepare("SELECT id, name, avatar, role, enabled FROM users WHERE name = ?").get(name) as
+    | { id: string; name: string; avatar: string; role: string; enabled: number }
+    | undefined;
+
+  if (existing) {
+    if (existing.enabled === 0) {
+      // Restore the soft-deleted user (and update their avatar to the newly generated one)
+      db.prepare("UPDATE users SET enabled = 1, avatar = ? WHERE id = ?").run(avatar, existing.id);
+      return { id: existing.id, name: existing.name, avatar, role: existing.role };
+    }
+    // If already active, just return the existing active user
+    return { id: existing.id, name: existing.name, avatar: existing.avatar, role: existing.role };
+  }
+
+  const id = "u-" + randomUUID().slice(0, 8);
+  const role = "member";
+  db.prepare("INSERT INTO users (id, name, avatar, role, enabled) VALUES (?, ?, ?, ?, 1)").run(id, name, avatar, role);
+  return { id, name, avatar, role };
+});
+
+app.delete<{
+  Params: { userId: string };
+}>("/api/users/:userId", async (request) => {
+  const { userId } = request.params;
+  db.prepare("UPDATE users SET enabled = 0 WHERE id = ?").run(userId);
+  return { ok: true };
 });
 
 app.get<{ Querystring: { userId?: string } }>("/api/books", async (request) => {
