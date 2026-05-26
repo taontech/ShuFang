@@ -2,7 +2,7 @@ import Fastify, { type FastifyReply } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { openDatabase } from "./database.js";
 import { addScanRoot, scanLibrary } from "./scanner.js";
@@ -113,6 +113,40 @@ app.put<{
   `).run({ userId, bookId, cfi, percentage, chapterTitle: chapterTitle ?? null });
 
   return { ok: true };
+});
+
+app.put<{
+  Params: { bookId: string };
+  Body: { cover: string };
+}>("/api/books/:bookId/cover", async (request, reply) => {
+  const { bookId } = request.params;
+  const { cover } = request.body;
+
+  const book = db.prepare("SELECT file_path AS filePath FROM books WHERE id = ?").get(bookId) as
+    | { filePath: string }
+    | undefined;
+  if (!book) {
+    return reply.code(404).send({ error: "book_not_found" });
+  }
+
+  const matches = cover.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+  if (!matches) {
+    return reply.code(400).send({ error: "invalid_format" });
+  }
+
+  const ext = "." + matches[1];
+  const buffer = Buffer.from(matches[2], "base64");
+
+  const dir = join(process.cwd(), "data", "covers");
+  await mkdir(dir, { recursive: true });
+  const fileName = `${bookId}${ext}`;
+  const assetPath = join(dir, fileName);
+  await writeFile(assetPath, buffer);
+
+  const coverPath = `/assets/covers/${fileName}`;
+  db.prepare("UPDATE books SET cover_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(coverPath, bookId);
+
+  return { ok: true, coverPath };
 });
 
 app.get<{ Querystring: { userId?: string; days?: string } }>("/api/reading/activity", async (request) => {

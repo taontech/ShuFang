@@ -94,7 +94,7 @@ async function upsertBook(db: Database.Database, filePath: string) {
     ON CONFLICT(file_path) DO UPDATE SET
       title = excluded.title,
       author = excluded.author,
-      cover_path = excluded.cover_path,
+      cover_path = COALESCE(excluded.cover_path, books.cover_path),
       description = excluded.description,
       language = excluded.language,
       file_type = excluded.file_type,

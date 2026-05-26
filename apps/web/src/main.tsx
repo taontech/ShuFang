@@ -227,6 +227,19 @@ function App() {
     );
   };
 
+  const updateBookCover = (bookId: string, coverPath: string) => {
+    setBooks((currentBooks) =>
+      currentBooks.map((book) =>
+        book.id === bookId
+          ? {
+              ...book,
+              coverPath
+            }
+          : book
+      )
+    );
+  };
+
   const addReadingSeconds = (seconds: number) => {
     const day = calendarDateKey(new Date());
     setReadingActivity((items) => {
@@ -355,9 +368,10 @@ function App() {
                 goBooks={() => setView("books")}
                 goMusic={() => setView("music")}
                 goSettings={() => setView("settings")}
+                onCoverExtracted={updateBookCover}
               />
             )}
-            {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => setView("settings")} />}
+            {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => setView("settings")} onCoverExtracted={updateBookCover} />}
             {view === "reader" && activeBook && (
               <ReaderView
                 book={activeBook}
@@ -431,7 +445,8 @@ function HomeView({
   readingActivity,
   goBooks,
   goMusic,
-  goSettings
+  goSettings,
+  onCoverExtracted
 }: {
   books: BookItem[];
   tracks: AudioTrack[];
@@ -441,6 +456,7 @@ function HomeView({
   goBooks: () => void;
   goMusic: () => void;
   goSettings: () => void;
+  onCoverExtracted?: (bookId: string, coverPath: string) => void;
 }) {
   const heroBook = books[0];
   const recentBooks = readingBooks(books).slice(0, 10);
@@ -486,7 +502,7 @@ function HomeView({
         <SectionTitle icon={<Bookmark size={18} />} title="正在阅读" actionLabel="更多" onAction={goBooks} />
         <div className="book-row">
           {recentBooks.map((book) => (
-            <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} />
+            <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} onCoverExtracted={onCoverExtracted} />
           ))}
         </div>
       </section>
@@ -576,11 +592,13 @@ function ReadingCalendar({ activity }: { activity: ReadingActivity[] }) {
 function BooksView({
   books,
   openBook,
-  goSettings
+  goSettings,
+  onCoverExtracted
 }: {
   books: BookItem[];
   openBook: (bookId: string) => void;
   goSettings: () => void;
+  onCoverExtracted?: (bookId: string, coverPath: string) => void;
 }) {
   const [mode, setMode] = useState<"recent" | "added" | "bookmarked" | "unfinished">("recent");
   if (books.length === 0) return <EmptyLibrary goSettings={goSettings} />;
@@ -604,7 +622,7 @@ function BooksView({
       </div>
       <div className="book-grid">
         {visibleBooks.map((book) => (
-          <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} />
+          <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} onCoverExtracted={onCoverExtracted} />
         ))}
       </div>
     </div>
@@ -1302,12 +1320,116 @@ function EmptyLibrary({ goSettings }: { goSettings: () => void }) {
   );
 }
 
-function BookCard({ book, onOpen }: { book: BookItem; onOpen: () => void }) {
+function PdfCover({
+  bookId,
+  title,
+  onCoverExtracted
+}: {
+  bookId: string;
+  title: string;
+  onCoverExtracted?: (bookId: string, coverPath: string) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [rendered, setRendered] = useState(false);
+
+  useEffect(() => {
+    let disposed = false;
+    let loadingTask: any = null;
+    let pdfDoc: any = null;
+
+    const renderCover = async () => {
+      try {
+        const src = `${API_BASE}/api/books/${bookId}/file`;
+        loadingTask = pdfjsLib.getDocument(src);
+        pdfDoc = await loadingTask.promise;
+        if (disposed) return;
+
+        const page = await pdfDoc.getPage(1);
+        if (disposed) return;
+
+        const viewport = page.getViewport({ scale: 0.3 });
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+
+        const context = canvas.getContext("2d");
+        if (!context) return;
+
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        context.clearRect(0, 0, viewport.width, viewport.height);
+
+        await page.render({ canvasContext: context, viewport }).promise;
+        if (disposed) return;
+
+        setRendered(true);
+
+        const coverDataUrl = canvas.toDataURL("image/png");
+        const result = await api<{ ok: boolean; coverPath: string }>(`/api/books/${bookId}/cover`, {
+          method: "PUT",
+          body: JSON.stringify({ cover: coverDataUrl })
+        });
+        if (disposed) return;
+
+        if (result && result.coverPath && onCoverExtracted) {
+          onCoverExtracted(bookId, result.coverPath);
+        }
+      } catch (err) {
+        console.error("Failed to render PDF cover on-the-fly:", err);
+      }
+    };
+
+    void renderCover();
+
+    return () => {
+      disposed = true;
+      if (loadingTask) {
+        try {
+          loadingTask.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      if (pdfDoc) {
+        try {
+          void pdfDoc.destroy();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [bookId]);
+
+  return (
+    <span className="pdf-cover-canvas-container" style={{ position: "absolute", inset: 0, zIndex: 0, width: "100%", height: "100%", display: "block" }}>
+      <canvas ref={canvasRef} style={{ width: "100%", height: "100%", objectFit: "cover", display: rendered ? "block" : "none" }} />
+      {!rendered && <span style={{ padding: "0 8px", textAlign: "center", display: "flex", alignItems: "center", justifyContent: "center", width: "100%", height: "100%", color: "#fff", textShadow: "0 2px 8px rgba(0,0,0,0.5)", fontWeight: "bold" }}>{title}</span>}
+    </span>
+  );
+}
+
+function BookCard({
+  book,
+  onOpen,
+  onCoverExtracted
+}: {
+  book: BookItem;
+  onOpen: () => void;
+  onCoverExtracted?: (bookId: string, coverPath: string) => void;
+}) {
+  const isPdf = book.format === "pdf";
+  const hasCover = !!book.coverPath;
+
   return (
     <button className="book-card" onClick={onOpen}>
-      <span className="book-cover" style={{ backgroundImage: coverBackground(book.coverPath) }}>
+      <span className="book-cover" style={{ backgroundImage: hasCover ? coverBackground(book.coverPath) : undefined }}>
         <span className={`format-ribbon ${book.format}`}>{book.format.toUpperCase()}</span>
-        <span>{book.coverPath ? "" : book.title}</span>
+        {hasCover ? (
+          ""
+        ) : isPdf ? (
+          <PdfCover bookId={book.id} title={book.title} onCoverExtracted={onCoverExtracted} />
+        ) : (
+          <span>{book.title}</span>
+        )}
       </span>
       <strong>{book.title}</strong>
       <small>{book.author ?? "未知作者"}</small>
