@@ -1119,15 +1119,19 @@ function PdfReader({
   const title = book.title;
 
   const lastSavedPageRef = useRef<number>(0);
+  const activePageRef = useRef<number>(0);
+  const pageCountRef = useRef<number>(0);
   const saveTimerRef = useRef<number | null>(null);
   const isScrollingToSavedRef = useRef<boolean>(false);
 
   useEffect(() => {
     let disposed = false;
     setPageCount(0);
+    pageCountRef.current = 0;
     setError("");
     pdfRef.current = null;
     lastSavedPageRef.current = 0;
+    activePageRef.current = 0;
     isScrollingToSavedRef.current = false;
 
     const loadingTask = pdfjsLib.getDocument(src);
@@ -1139,6 +1143,7 @@ function PdfReader({
         }
         pdfRef.current = pdf;
         setPageCount(pdf.numPages);
+        pageCountRef.current = pdf.numPages;
       })
       .catch(() => {
         if (!disposed) setError("这份 PDF 暂时无法渲染。");
@@ -1159,20 +1164,29 @@ function PdfReader({
       const match = book.cfi.match(/page-(\d+)/);
       if (match) {
         const savedPage = parseInt(match[1], 10);
-        if (savedPage > 1 && savedPage <= pageCount) {
+        if (savedPage > 0 && savedPage <= pageCount) {
           isScrollingToSavedRef.current = true;
-          setTimeout(() => {
-            const el = document.getElementById(`pdf-page-${savedPage}`);
-            if (el) {
-              el.scrollIntoView({ block: "start" });
-              lastSavedPageRef.current = savedPage;
-            }
+          activePageRef.current = savedPage;
+          lastSavedPageRef.current = savedPage;
+
+          if (savedPage > 1) {
             setTimeout(() => {
-              isScrollingToSavedRef.current = false;
-            }, 300);
-          }, 150);
+              const el = document.getElementById(`pdf-page-${savedPage}`);
+              if (el) {
+                el.scrollIntoView({ block: "start" });
+              }
+              setTimeout(() => {
+                isScrollingToSavedRef.current = false;
+              }, 300);
+            }, 150);
+          } else {
+            isScrollingToSavedRef.current = false;
+          }
         }
       }
+    } else if (pageCount > 0) {
+      activePageRef.current = 1;
+      lastSavedPageRef.current = 1;
     }
   }, [pageCount, book.id]);
 
@@ -1194,15 +1208,18 @@ function PdfReader({
 
       const children = container.getElementsByClassName("pdf-page");
       let activePageNum = 1;
-      let minDiff = Infinity;
-      const containerCenter = container.scrollTop + container.clientHeight / 2;
+      let maxVisibleHeight = -1;
+      const containerRect = container.getBoundingClientRect();
 
       for (let i = 0; i < children.length; i++) {
         const el = children[i] as HTMLElement;
-        const elCenter = el.offsetTop + el.clientHeight / 2;
-        const diff = Math.abs(containerCenter - elCenter);
-        if (diff < minDiff) {
-          minDiff = diff;
+        const rect = el.getBoundingClientRect();
+        const visibleTop = Math.max(rect.top, containerRect.top);
+        const visibleBottom = Math.min(rect.bottom, containerRect.bottom);
+        const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+
+        if (visibleHeight > maxVisibleHeight) {
+          maxVisibleHeight = visibleHeight;
           const pageIdMatch = el.id.match(/pdf-page-(\d+)/);
           if (pageIdMatch) {
             activePageNum = parseInt(pageIdMatch[1], 10);
@@ -1210,14 +1227,16 @@ function PdfReader({
         }
       }
 
-      if (activePageNum !== lastSavedPageRef.current) {
-        lastSavedPageRef.current = activePageNum;
+      if (maxVisibleHeight > 0 && activePageNum !== activePageRef.current) {
+        activePageRef.current = activePageNum;
         if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = window.setTimeout(() => {
-          const percentage = Math.round((activePageNum / pageCount) * 100);
-          const chapter = `第 ${activePageNum} 页`;
-          const cfi = `page-${activePageNum}`;
+          const pageToSave = activePageNum;
+          const percentage = Math.round((pageToSave / pageCount) * 100);
+          const chapter = `第 ${pageToSave} 页`;
+          const cfi = `page-${pageToSave}`;
           void saveProgress(book.id, user.id, cfi, percentage, chapter).then(() => {
+            lastSavedPageRef.current = pageToSave;
             onProgressSaved(book.id, cfi, percentage, chapter);
           });
         }, 1000);
@@ -1229,6 +1248,29 @@ function PdfReader({
       container.removeEventListener("scroll", handleScroll);
     };
   }, [pageCount, book.id, user.id, onProgressSaved]);
+
+  // Save progress on unmount if there is pending unsaved progress
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      if (
+        activePageRef.current > 0 &&
+        activePageRef.current !== lastSavedPageRef.current &&
+        pageCountRef.current > 0
+      ) {
+        const pageToSave = activePageRef.current;
+        const totalPages = pageCountRef.current;
+        const percentage = Math.round((pageToSave / totalPages) * 100);
+        const chapter = `第 ${pageToSave} 页`;
+        const cfi = `page-${pageToSave}`;
+        void saveProgress(book.id, user.id, cfi, percentage, chapter).then(() => {
+          onProgressSaved(book.id, cfi, percentage, chapter);
+        });
+      }
+    };
+  }, [book.id, user.id, onProgressSaved]);
 
   if (error) {
     return (
