@@ -33,7 +33,8 @@ import {
   Trash2,
   UserRound,
   Plus,
-  X
+  X,
+  Menu
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import "./styles/app.css";
@@ -129,6 +130,7 @@ function App() {
   const [currentLyricText, setCurrentLyricText] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [message, setMessage] = useState("");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const mainPanelRef = useRef<HTMLElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const previousViewRef = useRef<View>("books");
@@ -329,9 +331,25 @@ function App() {
     }
   };
 
+  const navigateTo = (nextView: View) => {
+    setView(nextView);
+    setIsSidebarOpen(false);
+  };
+
   return (
     <div className="app-shell" data-theme={theme} data-view={view}>
-      <aside className="sidebar" aria-label="主导航">
+      {isSidebarOpen && <div className="sidebar-backdrop" onClick={() => setIsSidebarOpen(false)} />}
+      
+      <header className="mobile-topbar">
+        <button className="mobile-menu-btn" onClick={() => setIsSidebarOpen(true)} aria-label="打开导航">
+          <Menu size={22} />
+        </button>
+        <div className="mobile-brand-title">
+          <strong>书房</strong>
+        </div>
+      </header>
+
+      <aside className={`sidebar ${isSidebarOpen ? "open" : ""}`} aria-label="主导航">
         <div className="brand">
           <button
             className="brand-mark brand-mark-btn"
@@ -350,14 +368,16 @@ function App() {
             <strong>书房</strong>
             <span>shufang.local</span>
           </div>
+          <button className="sidebar-close-btn" onClick={() => setIsSidebarOpen(false)} aria-label="关闭导航">
+            <X size={20} />
+          </button>
         </div>
 
         <nav className="nav-list">
-          <NavButton icon={<Home size={19} />} active={view === "home"} onClick={() => setView("home")} label="首页" />
-          <NavButton icon={<Library size={19} />} active={view === "books"} onClick={() => setView("books")} label="书架" />
-          <NavButton icon={<Music2 size={19} />} active={view === "music"} onClick={() => setView("music")} label="音乐" />
-          <NavButton icon={<Mic2 size={19} />} active={view === "podcasts"} onClick={() => setView("podcasts")} label="播客" />
-          <NavButton icon={<Settings size={19} />} active={view === "settings"} onClick={() => setView("settings")} label="资源" />
+          <NavButton icon={<Home size={19} />} active={view === "home"} onClick={() => navigateTo("home")} label="首页" />
+          <NavButton icon={<Library size={19} />} active={view === "books"} onClick={() => navigateTo("books")} label="书架" />
+          <NavButton icon={<Music2 size={19} />} active={view === "music"} onClick={() => navigateTo("music")} label="音乐" />
+          <NavButton icon={<Settings size={19} />} active={view === "settings"} onClick={() => navigateTo("settings")} label="资源" />
         </nav>
 
         <div className="sidebar-footer">
@@ -367,9 +387,6 @@ function App() {
               <strong>{activeUser.name}</strong>
               <small>切换/管理用户</small>
             </div>
-          </button>
-          <button className="icon-button" onClick={() => setTheme(theme === "night" ? "day" : "night")} aria-label="切换主题">
-            {theme === "night" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
         </div>
       </aside>
@@ -387,19 +404,18 @@ function App() {
             {view === "home" && (
               <HomeView
                 books={books}
-                tracks={[...music, ...podcasts]}
+                tracks={music}
                 openBook={openBook}
                 playTrack={playTrack}
                 readingActivity={readingActivity}
-                goBooks={() => setView("books")}
-                goMusic={() => setView("music")}
-                goSettings={() => setView("settings")}
+                goBooks={() => navigateTo("books")}
+                goMusic={() => navigateTo("music")}
+                goSettings={() => navigateTo("settings")}
                 onCoverExtracted={updateBookCover}
               />
             )}
-            {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => setView("settings")} onCoverExtracted={updateBookCover} />}
+            {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => navigateTo("settings")} onCoverExtracted={updateBookCover} />}
             {view === "music" && <AudioView kind="music" tracks={music} playTrack={playTrack} />}
-            {view === "podcasts" && <AudioView kind="podcasts" tracks={podcasts} playTrack={playTrack} />}
             {view === "settings" && (
               <SettingsView roots={roots} runScan={runScan} isScanning={isScanning} message={message} refresh={refreshAll} />
             )}
@@ -557,7 +573,7 @@ function HomeView({
 
       <section className="audio-panel">
         <SectionTitle icon={<ListMusic size={18} />} title="正在收听" actionLabel="更多" onAction={goMusic} />
-        <TrackList tracks={tracks.slice(0, 20)} playTrack={playTrack} />
+        <TrackList tracks={tracks.slice(0, 10)} playTrack={playTrack} />
       </section>
     </div>
   );
