@@ -181,13 +181,35 @@ async function readEpubMetadata(filePath: string) {
 }
 
 function findCoverHref(metadata: Record<string, unknown>, manifest: Array<Record<string, string>>) {
+  // 1. Standard: Search by meta name="cover"
   const coverMeta = arrayOf(metadata.meta as Record<string, string> | Record<string, string>[] | undefined).find(
     (item) => item?.["@_name"] === "cover"
   );
   const coverId = coverMeta?.["@_content"];
   const byMeta = coverId ? manifest.find((item) => item["@_id"] === coverId) : undefined;
+  if (byMeta?.["@_href"]) return byMeta["@_href"];
+
+  // 2. Standard: Search by ePub3 properties="cover-image"
   const byProperties = manifest.find((item) => item["@_properties"]?.includes("cover-image"));
-  return byMeta?.["@_href"] ?? byProperties?.["@_href"] ?? null;
+  if (byProperties?.["@_href"]) return byProperties["@_href"];
+
+  // 3. Fallback: Search by ID containing "cover" (case-insensitive) for image media-types
+  const byId = manifest.find((item) => {
+    const id = (item["@_id"] || "").toLowerCase();
+    const mediaType = (item["@_media-type"] || "");
+    return id.includes("cover") && mediaType.startsWith("image/");
+  });
+  if (byId?.["@_href"]) return byId["@_href"];
+
+  // 4. Fallback: Search by Href containing "cover" (case-insensitive) for image media-types
+  const byHref = manifest.find((item) => {
+    const href = (item["@_href"] || "").toLowerCase();
+    const mediaType = (item["@_media-type"] || "");
+    return href.includes("cover") && mediaType.startsWith("image/");
+  });
+  if (byHref?.["@_href"]) return byHref["@_href"];
+
+  return null;
 }
 
 async function extractEpubCover(zip: JSZip, opfPath: string, coverHref: string, filePath: string) {
