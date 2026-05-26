@@ -34,6 +34,7 @@ function migrate(db: Database.Database) {
       cover_path TEXT,
       description TEXT,
       language TEXT,
+      file_type TEXT NOT NULL DEFAULT 'epub',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -48,6 +49,15 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (user_id, book_id),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS reading_activity (
+      user_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      seconds INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, day),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS bookmarks (
@@ -96,6 +106,7 @@ function migrate(db: Database.Database) {
   `);
 
   addColumn(db, "books", "description", "TEXT");
+  addColumn(db, "books", "file_type", "TEXT NOT NULL DEFAULT 'epub'");
   addColumn(db, "scan_roots", "last_scanned_at", "TEXT");
 }
 

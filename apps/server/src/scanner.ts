@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 
-const bookExtensions = new Set([".epub"]);
+const bookExtensions = new Set([".epub", ".pdf"]);
 const audioExtensions = new Set([".mp3", ".m4a", ".aac", ".flac", ".alac", ".wav", ".ogg", ".opus"]);
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -87,16 +87,17 @@ async function* walk(rootPath: string): AsyncGenerator<string> {
 }
 
 async function upsertBook(db: Database.Database, filePath: string) {
-  const metadata = await readEpubMetadata(filePath);
+  const metadata = extname(filePath).toLowerCase() === ".pdf" ? readPdfMetadata(filePath) : await readEpubMetadata(filePath);
   db.prepare(`
-    INSERT INTO books (id, file_path, title, author, cover_path, description, language, updated_at)
-    VALUES (@id, @filePath, @title, @author, @coverPath, @description, @language, CURRENT_TIMESTAMP)
+    INSERT INTO books (id, file_path, title, author, cover_path, description, language, file_type, updated_at)
+    VALUES (@id, @filePath, @title, @author, @coverPath, @description, @language, @fileType, CURRENT_TIMESTAMP)
     ON CONFLICT(file_path) DO UPDATE SET
       title = excluded.title,
       author = excluded.author,
       cover_path = excluded.cover_path,
       description = excluded.description,
       language = excluded.language,
+      file_type = excluded.file_type,
       updated_at = CURRENT_TIMESTAMP
   `).run({
     id: stableId(filePath),
@@ -105,8 +106,20 @@ async function upsertBook(db: Database.Database, filePath: string) {
     author: metadata.author,
     coverPath: metadata.coverPath,
     description: metadata.description,
-    language: metadata.language
+    language: metadata.language,
+    fileType: metadata.fileType
   });
+}
+
+function readPdfMetadata(filePath: string) {
+  return {
+    title: basename(filePath, extname(filePath)),
+    author: null,
+    language: null,
+    description: null,
+    coverPath: null,
+    fileType: "pdf"
+  };
 }
 
 async function upsertAudio(db: Database.Database, filePath: string) {
@@ -164,7 +177,7 @@ async function readEpubMetadata(filePath: string) {
   const coverHref = findCoverHref(metadata, manifest);
   const coverPath = coverHref ? await extractEpubCover(zip, opfPath, coverHref, filePath) : null;
 
-  return { title, author, language, description, coverPath };
+  return { title, author, language, description, coverPath, fileType: "epub" };
 }
 
 function findCoverHref(metadata: Record<string, unknown>, manifest: Array<Record<string, string>>) {

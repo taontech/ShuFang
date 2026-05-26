@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import ePub, { type Book as EpubBook, type Location, type NavItem, type Rendition } from "epubjs";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 import {
   BookMarked,
   BookOpen,
   Bookmark,
+  CalendarDays,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -22,19 +25,19 @@ import {
   RefreshCw,
   Repeat,
   Repeat1,
-  Search,
   Shuffle,
   Settings,
   Sparkles,
   Sun,
+  Timer,
   Trash2,
   UserRound
 } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
-import { AmbientParticles } from "./components/AmbientParticles";
 import "./styles/app.css";
 
 const API_BASE = resolveApiBase();
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 type View = "home" | "books" | "reader" | "music" | "podcasts" | "settings";
 type Theme = "night" | "day";
@@ -53,9 +56,14 @@ type BookItem = {
   author: string | null;
   coverPath: string | null;
   description: string | null;
+  format: "epub" | "pdf";
+  createdAt: string;
+  updatedAt: string;
   progress: number;
   cfi: string | null;
   chapterTitle: string | null;
+  recentReadAt: string | null;
+  bookmarkCount: number;
 };
 
 type AudioTrack = {
@@ -90,14 +98,20 @@ type LyricLine = {
   text: string;
 };
 
+type ReadingActivity = {
+  day: string;
+  seconds: number;
+};
+
 function App() {
   const [view, setView] = useState<View>("home");
-  const [theme, setTheme] = useState<Theme>("night");
+  const [theme, setTheme] = useState<Theme>("day");
   const [users, setUsers] = useState<User[]>([]);
   const [books, setBooks] = useState<BookItem[]>([]);
   const [music, setMusic] = useState<AudioTrack[]>([]);
   const [podcasts, setPodcasts] = useState<AudioTrack[]>([]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
+  const [readingActivity, setReadingActivity] = useState<ReadingActivity[]>([]);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
   const [activeUserId, setActiveUserId] = useState("u-1");
   const [currentTrack, setCurrentTrack] = useState<AudioTrack | null>(null);
@@ -111,6 +125,8 @@ function App() {
   const [message, setMessage] = useState("");
   const mainPanelRef = useRef<HTMLElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const previousViewRef = useRef<View>("books");
+  const returningFromReaderRef = useRef(false);
 
   const activeBook = useMemo(
     () => books.find((book) => book.id === activeBookId) ?? books[0] ?? null,
@@ -134,6 +150,10 @@ function App() {
   }, [activeBookId, books]);
 
   useEffect(() => {
+    if (returningFromReaderRef.current) {
+      returningFromReaderRef.current = false;
+      return;
+    }
     mainPanelRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   }, [view]);
 
@@ -174,11 +194,52 @@ function App() {
     setMusic(nextMusic);
     setPodcasts(nextPodcasts);
     setRoots(nextRoots);
+    await refreshReadingActivity(userId);
+  };
+
+  const refreshReadingActivity = async (userId = activeUserId) => {
+    const activity = await api<ReadingActivity[]>(`/api/reading/activity?userId=${encodeURIComponent(userId)}&days=10000`);
+    setReadingActivity(activity);
   };
 
   const openBook = (bookId: string) => {
+    if (view !== "reader") {
+      previousViewRef.current = view;
+    }
     setActiveBookId(bookId);
     setView("reader");
+  };
+
+  const updateBookProgress = (bookId: string, cfi: string, progress: number, chapterTitle: string) => {
+    const now = new Date().toISOString();
+    setBooks((currentBooks) =>
+      currentBooks.map((book) =>
+        book.id === bookId
+          ? {
+              ...book,
+              cfi,
+              progress,
+              chapterTitle,
+              recentReadAt: now
+            }
+          : book
+      )
+    );
+  };
+
+  const addReadingSeconds = (seconds: number) => {
+    const day = calendarDateKey(new Date());
+    setReadingActivity((items) => {
+      const existing = items.find((item) => item.day === day);
+      if (existing) {
+        return items.map((item) => (item.day === day ? { ...item, seconds: item.seconds + seconds } : item));
+      }
+      return [...items, { day, seconds }].sort((a, b) => a.day.localeCompare(b.day));
+    });
+    void api("/api/reading/activity", {
+      method: "POST",
+      body: JSON.stringify({ userId: activeUserId, seconds, day })
+    });
   };
 
   const playTrack = (track: AudioTrack) => {
@@ -204,16 +265,22 @@ function App() {
     }
     if (playMode === "shuffle") {
       const choices = queue.filter((track) => track.id !== currentTrack.id);
-      playTrack(choices[Math.floor(Math.random() * choices.length)] ?? currentTrack);
+      const nextTrack = choices[Math.floor(Math.random() * choices.length)] ?? currentTrack;
+      if (nextTrack.id === currentTrack.id) restartCurrentTrack(audioRef.current, setIsPlaying);
+      else playTrack(nextTrack);
       return;
     }
     const index = queue.findIndex((track) => track.id === currentTrack.id);
-    playTrack(queue[(index + 1) % queue.length]);
+    const nextTrack = queue[(index + 1) % queue.length];
+    if (nextTrack.id === currentTrack.id) restartCurrentTrack(audioRef.current, setIsPlaying);
+    else playTrack(nextTrack);
   };
 
   const seekAudio = (position: number) => {
     if (!audioRef.current) return;
-    audioRef.current.currentTime = position;
+    if (!Number.isFinite(position)) return;
+    const duration = finiteDuration(audioRef.current.duration) ?? audioDuration;
+    audioRef.current.currentTime = duration ? Math.min(position, duration) : position;
     setAudioPosition(position);
   };
 
@@ -234,8 +301,7 @@ function App() {
   };
 
   return (
-    <div className="app-shell" data-theme={theme}>
-      <AmbientParticles isPlaying={isPlaying} />
+    <div className="app-shell" data-theme={theme} data-view={view}>
       <aside className="sidebar" aria-label="主导航">
         <div className="brand">
           <div className="brand-mark">
@@ -270,17 +336,6 @@ function App() {
       </aside>
 
       <main className="main-panel" ref={mainPanelRef}>
-        <header className="topbar">
-          <div>
-            <p className="eyebrow">{roots.length > 0 ? "家庭共享书架" : "先设置资源路径"}</p>
-            <h1>{titleForView(view, activeBook?.title)}</h1>
-          </div>
-          <label className="search-box">
-            <Search size={18} />
-            <input placeholder="搜索书籍、专辑、播客" />
-          </label>
-        </header>
-
         <AnimatePresence mode="wait">
           <motion.section
             key={view}
@@ -291,11 +346,31 @@ function App() {
             className="view-stage"
           >
             {view === "home" && (
-              <HomeView books={books} tracks={[...music, ...podcasts]} openBook={openBook} playTrack={playTrack} goSettings={() => setView("settings")} />
+              <HomeView
+                books={books}
+                tracks={[...music, ...podcasts]}
+                openBook={openBook}
+                playTrack={playTrack}
+                readingActivity={readingActivity}
+                goBooks={() => setView("books")}
+                goMusic={() => setView("music")}
+                goSettings={() => setView("settings")}
+              />
             )}
             {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => setView("settings")} />}
             {view === "reader" && activeBook && (
-              <ReaderView book={activeBook} user={activeUser} theme={theme} onProgressSaved={() => refreshAll()} />
+              <ReaderView
+                book={activeBook}
+                user={activeUser}
+                theme={theme}
+                setTheme={setTheme}
+                onBack={() => {
+                  returningFromReaderRef.current = true;
+                  setView(previousViewRef.current);
+                }}
+                onProgressSaved={updateBookProgress}
+                onReadingTick={addReadingSeconds}
+              />
             )}
             {view === "reader" && !activeBook && <EmptyLibrary goSettings={() => setView("settings")} />}
             {view === "music" && <AudioView kind="music" tracks={music} playTrack={playTrack} />}
@@ -311,9 +386,11 @@ function App() {
         ref={audioRef}
         src={currentTrack ? `${API_BASE}/api/audio/${currentTrack.id}/stream` : undefined}
         loop={playMode === "repeat-one"}
+        preload="metadata"
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
-        onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration || currentTrack?.duration || 0)}
+        onLoadedMetadata={(event) => setAudioDuration(finiteDuration(event.currentTarget.duration) ?? currentTrack?.duration ?? 0)}
+        onDurationChange={(event) => setAudioDuration(finiteDuration(event.currentTarget.duration) ?? currentTrack?.duration ?? 0)}
         onTimeUpdate={(event) => setAudioPosition(event.currentTarget.currentTime)}
         onEnded={playNextTrack}
       />
@@ -351,40 +428,43 @@ function HomeView({
   tracks,
   openBook,
   playTrack,
+  readingActivity,
+  goBooks,
+  goMusic,
   goSettings
 }: {
   books: BookItem[];
   tracks: AudioTrack[];
   openBook: (bookId: string) => void;
   playTrack: (track: AudioTrack) => void;
+  readingActivity: ReadingActivity[];
+  goBooks: () => void;
+  goMusic: () => void;
   goSettings: () => void;
 }) {
   const heroBook = books[0];
-  const heroTrack = tracks[0];
+  const recentBooks = readingBooks(books).slice(0, 10);
+  const todaySeconds = readingActivity.find((item) => item.day === calendarDateKey(new Date()))?.seconds ?? 0;
 
-  if (!heroBook && !heroTrack) return <EmptyLibrary goSettings={goSettings} />;
+  if (!heroBook && tracks.length === 0) return <EmptyLibrary goSettings={goSettings} />;
 
   return (
     <div className="home-grid">
       <section className="hero-panel">
         <div className="hero-copy">
-          <p className="eyebrow">继续进入书房</p>
-          <h2>{heroBook ? `继续读《${heroBook.title}》` : "播放你的本地音乐"}</h2>
-          <p>共享同一间书房，资源来自家里的 Mac；每个人保留自己的页码、书签和收听位置。</p>
-          <div className="hero-actions">
-            {heroBook && (
-              <button className="primary-action" onClick={() => openBook(heroBook.id)}>
-                <BookOpen size={18} />
-                继续阅读
-              </button>
-            )}
-            {heroTrack && (
-              <button className="ghost-action" onClick={() => playTrack(heroTrack)}>
-                <Headphones size={18} />
-                继续收听
-              </button>
-            )}
+          <p className="eyebrow">阅读日历</p>
+          <h2>今天已阅读 {formatReadingTime(todaySeconds)}</h2>
+          <div className="reading-stats">
+            <span>
+              <Timer size={16} />
+              {formatReadingTime(totalReadingSeconds(readingActivity, 7))} / 近 7 天
+            </span>
+            <span>
+              <CalendarDays size={16} />
+              {activeReadingDays(readingActivity)} 天有阅读
+            </span>
           </div>
+          <ReadingCalendar activity={readingActivity} />
         </div>
         <div className="hero-stack" aria-hidden="true">
           {books.slice(0, 4).map((book, index) => (
@@ -403,18 +483,92 @@ function HomeView({
       </section>
 
       <section className="rail-section">
-        <SectionTitle icon={<Bookmark size={18} />} title="正在阅读" />
+        <SectionTitle icon={<Bookmark size={18} />} title="正在阅读" actionLabel="更多" onAction={goBooks} />
         <div className="book-row">
-          {books.slice(0, 4).map((book) => (
+          {recentBooks.map((book) => (
             <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} />
           ))}
         </div>
       </section>
 
       <section className="audio-panel">
-        <SectionTitle icon={<ListMusic size={18} />} title="正在收听" />
+        <SectionTitle icon={<ListMusic size={18} />} title="正在收听" actionLabel="更多" onAction={goMusic} />
         <TrackList tracks={tracks.slice(0, 4)} playTrack={playTrack} />
       </section>
+    </div>
+  );
+}
+
+function ReadingCalendar({ activity }: { activity: ReadingActivity[] }) {
+  const calendarRef = useRef<HTMLDivElement | null>(null);
+  const [weekCount, setWeekCount] = useState(13);
+  const activityByDay = new Map(activity.map((item) => [item.day, item.seconds]));
+  const weeks = calendarWeeks(weekCount);
+  const monthLabels = weeks.map((week, index) => {
+    const labelDate = week.find((date, dayIndex) => Boolean(date) && ((index === 0 && dayIndex === 0) || date?.getDate() === 1));
+    return labelDate ? labelDate.toLocaleDateString(undefined, { month: "short" }) : "";
+  });
+
+  useEffect(() => {
+    const calendar = calendarRef.current;
+    if (!calendar) return;
+
+    const updateColumns = () => {
+      const styles = window.getComputedStyle(calendar);
+      const cellSize = parseFloat(styles.getPropertyValue("--calendar-cell")) || 10;
+      const gapSize = parseFloat(styles.getPropertyValue("--calendar-gap")) || 3;
+      const labelWidth = parseFloat(styles.getPropertyValue("--calendar-label-width")) || 24;
+      const availableWidth = calendar.clientWidth || calendar.parentElement?.clientWidth || 0;
+      const maxColumns = Math.floor((availableWidth - labelWidth - 6 + gapSize) / (cellSize + gapSize));
+      setWeekCount((current) => {
+        const next = Math.max(13, maxColumns || 13);
+        return next === current ? current : next;
+      });
+    };
+
+    updateColumns();
+    const observer = new ResizeObserver(updateColumns);
+    observer.observe(calendar);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="reading-calendar" ref={calendarRef}>
+      <div className="calendar-grid" aria-label="阅读日历">
+        <div className="calendar-months">
+          {monthLabels.map((label, index) => (
+            <div className="calendar-month" key={`${label}-${index}`}>
+              {label}
+            </div>
+          ))}
+        </div>
+        <div className="calendar-weekdays">
+          {["", "一", "", "三", "", "五", ""].map((label, index) => (
+            <div className="calendar-weekday" key={index}>
+              {label}
+            </div>
+          ))}
+        </div>
+        <div className="calendar-weeks">
+          {weeks.map((week, weekIndex) => (
+            <div className="calendar-col" key={weekIndex}>
+              {week.map((date, dayIndex) => {
+                if (!date) return <div className="calendar-cell empty" key={dayIndex} />;
+                const day = calendarDateKey(date);
+                const seconds = activityByDay.get(day) ?? 0;
+                return (
+                  <div
+                    className="calendar-cell"
+                    data-level={readingLevel(seconds)}
+                    title={`${day} ${formatReadingTime(seconds)}`}
+                    key={day}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -428,18 +582,28 @@ function BooksView({
   openBook: (bookId: string) => void;
   goSettings: () => void;
 }) {
+  const [mode, setMode] = useState<"recent" | "added" | "bookmarked" | "unfinished">("recent");
   if (books.length === 0) return <EmptyLibrary goSettings={goSettings} />;
+  const visibleBooks = sortBooksForMode(books, mode);
 
   return (
     <div className="library-layout">
       <div className="filter-row">
-        <button className="filter-chip active">最近阅读</button>
-        <button className="filter-chip">最近加入</button>
-        <button className="filter-chip">有书签</button>
-        <button className="filter-chip">未读完</button>
+        <button className={`filter-chip ${mode === "recent" ? "active" : ""}`} onClick={() => setMode("recent")}>
+          最近阅读
+        </button>
+        <button className={`filter-chip ${mode === "added" ? "active" : ""}`} onClick={() => setMode("added")}>
+          最近加入
+        </button>
+        <button className={`filter-chip ${mode === "bookmarked" ? "active" : ""}`} onClick={() => setMode("bookmarked")}>
+          有书签
+        </button>
+        <button className={`filter-chip ${mode === "unfinished" ? "active" : ""}`} onClick={() => setMode("unfinished")}>
+          未读完
+        </button>
       </div>
       <div className="book-grid">
-        {books.map((book) => (
+        {visibleBooks.map((book) => (
           <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} />
         ))}
       </div>
@@ -451,18 +615,28 @@ function ReaderView({
   book,
   user,
   theme,
-  onProgressSaved
+  setTheme,
+  onBack,
+  onProgressSaved,
+  onReadingTick
 }: {
   book: BookItem;
   user: User;
   theme: Theme;
-  onProgressSaved: () => void;
+  setTheme: (theme: Theme) => void;
+  onBack: () => void;
+  onProgressSaved: (bookId: string, cfi: string, progress: number, chapterTitle: string) => void;
+  onReadingTick: (seconds: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
   const renditionRef = useRef<Rendition | null>(null);
   const epubBookRef = useRef<EpubBook | null>(null);
   const saveTimerRef = useRef<number | null>(null);
+  const wheelLockRef = useRef(false);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
   const currentCfiRef = useRef(book.cfi ?? "");
+  const locationsReadyRef = useRef(false);
   const [toc, setToc] = useState<NavItem[]>([]);
   const [drawer, setDrawer] = useState<"toc" | "bookmarks" | null>(null);
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
@@ -471,15 +645,59 @@ function ReaderView({
   const [note, setNote] = useState("");
   const [isReaderReady, setIsReaderReady] = useState(false);
   const [readerError, setReaderError] = useState("");
+  const [fontSize, setFontSize] = useState(() => readReaderFontSize());
+  const isPdf = book.format === "pdf";
+
+  const turnPage = (direction: "previous" | "next") => {
+    void (direction === "next" ? renditionRef.current?.next() : renditionRef.current?.prev());
+  };
+
+  const handleHorizontalWheel = (event: WheelEvent) => {
+    const horizontal = Math.abs(event.deltaX) > Math.abs(event.deltaY) * 1.15 && Math.abs(event.deltaX) > 36;
+    if (!horizontal || wheelLockRef.current) return;
+    event.preventDefault();
+    wheelLockRef.current = true;
+    turnPage(event.deltaX > 0 ? "next" : "previous");
+    window.setTimeout(() => {
+      wheelLockRef.current = false;
+    }, 460);
+  };
+
+  const startTouch = (clientX: number, clientY: number) => {
+    touchStartRef.current = { x: clientX, y: clientY };
+  };
+
+  const endTouch = (clientX: number, clientY: number) => {
+    const start = touchStartRef.current;
+    touchStartRef.current = null;
+    if (!start) return;
+    const deltaX = clientX - start.x;
+    const deltaY = clientY - start.y;
+    if (Math.abs(deltaX) < 56 || Math.abs(deltaX) < Math.abs(deltaY) * 1.25) return;
+    turnPage(deltaX < 0 ? "next" : "previous");
+  };
 
   useEffect(() => {
     let disposed = false;
     setToc([]);
     setProgress(Math.round(book.progress));
-    setChapterTitle(book.chapterTitle ?? "");
+    setChapterTitle(isPdf ? "PDF" : book.chapterTitle ?? "");
     setIsReaderReady(false);
     setReaderError("");
     currentCfiRef.current = book.cfi ?? "";
+    locationsReadyRef.current = false;
+
+    if (isPdf) {
+      setIsReaderReady(true);
+      currentCfiRef.current = "";
+      renditionRef.current?.destroy();
+      epubBookRef.current?.destroy();
+      renditionRef.current = null;
+      epubBookRef.current = null;
+      return () => {
+        disposed = true;
+      };
+    }
 
     const setup = async () => {
       try {
@@ -487,6 +705,7 @@ function ReaderView({
       } catch {
         try {
           const response = await fetch(`${API_BASE}/api/books/${book.id}/file`);
+          if (!response.ok) throw new Error("book_fetch_failed");
           await mountReader(await response.arrayBuffer());
         } catch {
           if (!disposed) setReaderError("这本 EPUB 暂时无法在网页阅读器中打开，可以先下载原文件。");
@@ -502,11 +721,23 @@ function ReaderView({
       const rendition = epubBook.renderTo(hostRef.current, {
         width: "100%",
         height: "100%",
-        spread: "none",
+        spread: readerSpreadForElement(hostRef.current),
+        minSpreadWidth: 860,
         flow: "paginated"
       });
       renditionRef.current = rendition;
-      applyReaderTheme(rendition, theme);
+      applyReaderTheme(rendition, theme, fontSize);
+      rendition.hooks.content.register((contents: { document: Document }) => {
+        contents.document.addEventListener("wheel", handleHorizontalWheel, { passive: false });
+        contents.document.addEventListener("touchstart", (event) => {
+          const touch = event.touches[0];
+          if (touch) startTouch(touch.clientX, touch.clientY);
+        });
+        contents.document.addEventListener("touchend", (event) => {
+          const touch = event.changedTouches[0];
+          if (touch) endTouch(touch.clientX, touch.clientY);
+        });
+      });
 
       await Promise.race([
         epubBook.ready,
@@ -516,28 +747,47 @@ function ReaderView({
       const cacheKey = `shufang.locations.${book.id}`;
       const cachedLocations = window.localStorage.getItem(cacheKey);
       if (cachedLocations) {
-        epubBook.locations.load(cachedLocations);
-      } else {
-        await epubBook.locations.generate(1200);
-        window.localStorage.setItem(cacheKey, epubBook.locations.save());
+        try {
+          epubBook.locations.load(cachedLocations);
+          locationsReadyRef.current = true;
+        } catch {
+          window.localStorage.removeItem(cacheKey);
+        }
       }
       setToc(epubBook.navigation.toc);
       rendition.on("relocated", (location: Location) => {
         const cfi = location.start.cfi;
         currentCfiRef.current = cfi;
-        const nextProgress = Math.round(epubBook.locations.percentageFromCfi(cfi) * 100);
+        const nextProgress = locationsReadyRef.current
+          ? Math.round(epubBook.locations.percentageFromCfi(cfi) * 100)
+          : progressFromLocation(location, progress);
         setProgress(nextProgress);
         const navItem = epubBook.navigation.get(location.start.href);
         const nextChapter = navItem?.label ?? "";
         setChapterTitle(nextChapter);
         if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = window.setTimeout(() => {
-          void saveProgress(book.id, user.id, cfi, nextProgress, nextChapter).then(onProgressSaved);
+          void saveProgress(book.id, user.id, cfi, nextProgress, nextChapter).then(() => {
+            onProgressSaved(book.id, cfi, nextProgress, nextChapter);
+          });
         }, 500);
       });
       await rendition.display(book.cfi ?? undefined);
       setIsReaderReady(true);
       await loadBookmarks(book.id, user.id, setBookmarks);
+      if (!locationsReadyRef.current) {
+        window.setTimeout(() => {
+          if (disposed) return;
+          void epubBook.locations.generate(800).then(() => {
+            if (disposed) return;
+            locationsReadyRef.current = true;
+            window.localStorage.setItem(cacheKey, epubBook.locations.save());
+            if (currentCfiRef.current) {
+              setProgress(Math.round(epubBook.locations.percentageFromCfi(currentCfiRef.current) * 100));
+            }
+          });
+        }, 600);
+      }
     };
 
     void setup();
@@ -550,14 +800,66 @@ function ReaderView({
       renditionRef.current = null;
       epubBookRef.current = null;
     };
-  }, [book.id, user.id]);
+  }, [book.id, user.id, isPdf]);
 
   useEffect(() => {
-    if (renditionRef.current) applyReaderTheme(renditionRef.current, theme);
-  }, [theme]);
+    if (renditionRef.current) applyReaderTheme(renditionRef.current, theme, fontSize);
+    window.localStorage.setItem("shufang.readerFontSize", String(fontSize));
+  }, [theme, fontSize]);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        const rendition = renditionRef.current;
+        if (!rendition || !hostRef.current) return;
+        const nextSpread = readerSpreadForElement(hostRef.current);
+        rendition.spread(nextSpread, 860);
+        rendition.resize(hostRef.current.clientWidth, hostRef.current.clientHeight);
+      });
+    });
+    observer.observe(host);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [book.id]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+
+    const onWheel = (event: WheelEvent) => {
+      handleHorizontalWheel(event);
+    };
+
+    workspace.addEventListener("wheel", onWheel, { passive: false });
+    return () => workspace.removeEventListener("wheel", onWheel);
+  }, [book.id]);
+
+  useEffect(() => {
+    if (!isReaderReady) return;
+    let lastTick = Date.now();
+    const timer = window.setInterval(() => {
+      if (document.hidden) {
+        lastTick = Date.now();
+        return;
+      }
+      const now = Date.now();
+      const seconds = Math.max(0, Math.round((now - lastTick) / 1000));
+      lastTick = now;
+      if (seconds > 0) onReadingTick(Math.min(seconds, 90));
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [book.id, isReaderReady, onReadingTick]);
 
   const addBookmark = async () => {
-    if (!currentCfiRef.current) return;
+    if (!currentCfiRef.current || isPdf) return;
     await api<BookmarkItem>("/api/bookmarks", {
       method: "POST",
       body: JSON.stringify({
@@ -577,32 +879,53 @@ function ReaderView({
   return (
     <div className="reader-shell">
       <div className="reader-command-bar">
-        <button className="icon-button" onClick={() => setDrawer(drawer === "toc" ? null : "toc")} aria-label="目录">
+        <button className="icon-button" onClick={onBack} aria-label="返回书架" title="返回书架">
+          <Library size={18} />
+        </button>
+        <button className="icon-button" onClick={() => setDrawer(drawer === "toc" ? null : "toc")} aria-label="目录" title="目录">
           <List size={18} />
         </button>
-        <button className="icon-button" onClick={() => void renditionRef.current?.prev()} aria-label="上一页">
-          <ChevronLeft size={18} />
-        </button>
         <div className="reader-status">
-          <strong>{chapterTitle || book.title}</strong>
-          <span>{user.name} 的进度 {progress}%</span>
+          <strong>{book.title}</strong>
+          <span>{chapterTitle || `${progress}%`}</span>
         </div>
-        <button className="icon-button" onClick={() => void renditionRef.current?.next()} aria-label="下一页">
-          <ChevronRight size={18} />
-        </button>
-        <button
-          className="icon-button"
-          onClick={() => setDrawer(drawer === "bookmarks" ? null : "bookmarks")}
-          aria-label="书签"
-        >
+        {!isPdf && <button className="icon-button" onClick={addBookmark} aria-label="标记此处" title="标记此处">
+          <Bookmark size={18} />
+        </button>}
+        {!isPdf && <button className="icon-button" onClick={() => setDrawer(drawer === "bookmarks" ? null : "bookmarks")} aria-label="书签" title="书签">
           <BookMarked size={18} />
+        </button>}
+        {!isPdf && (
+          <div className="font-size-control" aria-label="字号">
+            <button className="font-button" onClick={() => setFontSize((size) => Math.max(16, size - 1))} aria-label="减小字号">
+              A-
+            </button>
+            <span>{fontSize}</span>
+            <button className="font-button" onClick={() => setFontSize((size) => Math.min(30, size + 1))} aria-label="增大字号">
+              A+
+            </button>
+          </div>
+        )}
+        <button className="icon-button" onClick={() => setTheme(theme === "night" ? "day" : "night")} aria-label="切换主题" title="切换主题">
+          {theme === "night" ? <Sun size={18} /> : <Moon size={18} />}
         </button>
-        <a className="icon-button" href={`${API_BASE}/api/books/${book.id}/file`} download aria-label="下载">
+        <a className="icon-button" href={`${API_BASE}/api/books/${book.id}/file`} download aria-label="下载" title="下载">
           <Download size={18} />
         </a>
       </div>
 
-      <div className="reader-workspace">
+      <div
+        className="reader-workspace"
+        ref={workspaceRef}
+        onTouchStart={(event) => {
+          const touch = event.touches[0];
+          if (touch) startTouch(touch.clientX, touch.clientY);
+        }}
+        onTouchEnd={(event) => {
+          const touch = event.changedTouches[0];
+          if (touch) endTouch(touch.clientX, touch.clientY);
+        }}
+      >
         <AnimatePresence>
           {drawer === "toc" && (
             <ReaderDrawer title="目录" icon={<BookOpen size={18} />}>
@@ -655,15 +978,24 @@ function ReaderView({
               </a>
             </div>
           )}
-          <div ref={hostRef} className="epub-host" />
+          {isPdf ? (
+            <PdfReader src={`${API_BASE}/api/books/${book.id}/file`} title={book.title} />
+          ) : (
+            <>
+              <div ref={hostRef} className="epub-host" />
+              <div className="reader-gesture-layer" aria-hidden="true" />
+            </>
+          )}
         </article>
+        {!isPdf && <button className="reader-turn-button previous" onClick={() => turnPage("previous")} aria-label="上一页">
+          <ChevronLeft size={28} />
+        </button>}
+        {!isPdf && <button className="reader-turn-button next" onClick={() => turnPage("next")} aria-label="下一页">
+          <ChevronRight size={28} />
+        </button>}
       </div>
 
       <div className="reader-bottom">
-        <button className="ghost-action" onClick={addBookmark}>
-          <Bookmark size={18} />
-          标记此处
-        </button>
         <div className="progress-line">
           <span style={{ width: `${progress}%` }} />
         </div>
@@ -684,6 +1016,151 @@ function ReaderDrawer({ title, icon, children }: { title: string; icon: React.Re
       <SectionTitle icon={icon} title={title} />
       {children}
     </motion.aside>
+  );
+}
+
+function PdfReader({ src, title }: { src: string; title: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const pdfRef = useRef<any>(null);
+  const [pageCount, setPageCount] = useState(0);
+  const [layoutVersion, setLayoutVersion] = useState(0);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let disposed = false;
+    setPageCount(0);
+    setError("");
+    pdfRef.current = null;
+
+    const loadingTask = pdfjsLib.getDocument(src);
+    void loadingTask.promise
+      .then((pdf) => {
+        if (disposed) {
+          void pdf.destroy();
+          return;
+        }
+        pdfRef.current = pdf;
+        setPageCount(pdf.numPages);
+      })
+      .catch(() => {
+        if (!disposed) setError("这份 PDF 暂时无法渲染。");
+      });
+
+    return () => {
+      disposed = true;
+      loadingTask.destroy();
+      void pdfRef.current?.destroy();
+      pdfRef.current = null;
+    };
+  }, [src]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => setLayoutVersion((version) => version + 1));
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  if (error) {
+    return (
+      <div className="pdf-host pdf-message">
+        <span>{error}</span>
+        <a className="primary-action" href={src} download>
+          下载 PDF
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pdf-host" ref={containerRef} aria-label={title}>
+      {pageCount === 0 && <div className="pdf-message">正在打开《{title}》</div>}
+      {Array.from({ length: pageCount }, (_, index) => (
+        <PdfPageCanvas
+          key={index + 1}
+          pageNumber={index + 1}
+          pdfDocument={pdfRef.current}
+          containerRef={containerRef}
+          layoutVersion={layoutVersion}
+        />
+      ))}
+    </div>
+  );
+}
+
+function PdfPageCanvas({
+  pageNumber,
+  pdfDocument,
+  containerRef,
+  layoutVersion
+}: {
+  pageNumber: number;
+  pdfDocument: any;
+  containerRef: React.RefObject<HTMLDivElement>;
+  layoutVersion: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [isVisible, setIsVisible] = useState(pageNumber <= 2);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const root = containerRef.current;
+    if (!canvas || !root) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setIsVisible(true);
+      },
+      { root, rootMargin: "900px 0px" }
+    );
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [containerRef]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pdfDocument || !isVisible) return;
+    let disposed = false;
+    let renderTask: { cancel: () => void; promise: Promise<unknown> } | null = null;
+
+    const render = async () => {
+      const page = await pdfDocument.getPage(pageNumber);
+      if (disposed) return;
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max((containerRef.current?.clientWidth ?? window.innerWidth) - 48, 320);
+      const scale = Math.min(availableWidth / baseViewport.width, 2.2);
+      const viewport = page.getViewport({ scale });
+      const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+      const context = canvas.getContext("2d");
+      if (!context) return;
+
+      canvas.width = Math.floor(viewport.width * outputScale);
+      canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.style.width = `${viewport.width}px`;
+      canvas.style.height = `${viewport.height}px`;
+      context.setTransform(outputScale, 0, 0, outputScale, 0, 0);
+      context.clearRect(0, 0, viewport.width, viewport.height);
+      const task = page.render({ canvasContext: context, viewport });
+      renderTask = task;
+      await task.promise.catch((error: unknown) => {
+        if (!disposed && !(error instanceof Error && error.name === "RenderingCancelledException")) {
+          throw error;
+        }
+      });
+    };
+
+    void render();
+
+    return () => {
+      disposed = true;
+      renderTask?.cancel();
+    };
+  }, [containerRef, isVisible, layoutVersion, pageNumber, pdfDocument]);
+
+  return (
+    <div className="pdf-page" aria-label={`第 ${pageNumber} 页`}>
+      <canvas ref={canvasRef} />
+    </div>
   );
 }
 
@@ -829,6 +1306,7 @@ function BookCard({ book, onOpen }: { book: BookItem; onOpen: () => void }) {
   return (
     <button className="book-card" onClick={onOpen}>
       <span className="book-cover" style={{ backgroundImage: coverBackground(book.coverPath) }}>
+        <span className={`format-ribbon ${book.format}`}>{book.format.toUpperCase()}</span>
         <span>{book.coverPath ? "" : book.title}</span>
       </span>
       <strong>{book.title}</strong>
@@ -840,11 +1318,29 @@ function BookCard({ book, onOpen }: { book: BookItem; onOpen: () => void }) {
   );
 }
 
-function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
+function SectionTitle({
+  icon,
+  title,
+  actionLabel,
+  onAction
+}: {
+  icon: React.ReactNode;
+  title: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
   return (
     <div className="section-title">
-      {icon}
-      <h2>{title}</h2>
+      <span className="section-title-main">
+        {icon}
+        <h2>{title}</h2>
+      </span>
+      {actionLabel && onAction && (
+        <button className="section-more" onClick={onAction}>
+          {actionLabel}
+          <ChevronRight size={15} />
+        </button>
+      )}
     </div>
   );
 }
@@ -871,6 +1367,8 @@ function GlobalPlayer({
   activeLyric: string;
 }) {
   const nextMode = playMode === "repeat-all" ? "repeat-one" : playMode === "repeat-one" ? "shuffle" : "repeat-all";
+  const playableDuration = finiteDuration(duration) ?? 0;
+  const playablePosition = Number.isFinite(position) ? position : 0;
 
   return (
     <footer className="global-player">
@@ -890,13 +1388,13 @@ function GlobalPlayer({
             className="player-seek"
             type="range"
             min="0"
-            max={Math.max(duration, 0)}
+            max={playableDuration}
             step="0.1"
-            value={Math.min(position, duration || position)}
-            disabled={!track || !duration}
+            value={playableDuration ? Math.min(playablePosition, playableDuration) : 0}
+            disabled={!track || !playableDuration}
             onChange={(event) => seek(Number(event.currentTarget.value))}
           />
-          <span>{formatDuration(duration)}</span>
+          <span>{formatDuration(playableDuration)}</span>
         </div>
       </div>
       <button className="icon-button" onClick={() => setPlayMode(nextMode)} aria-label="切换循环模式" title={playModeLabel(playMode)}>
@@ -906,19 +1404,106 @@ function GlobalPlayer({
   );
 }
 
-function titleForView(view: View, bookTitle?: string) {
-  if (view === "books") return "家庭书架";
-  if (view === "reader") return bookTitle ?? "阅读";
-  if (view === "music") return "音乐";
-  if (view === "podcasts") return "播客";
-  if (view === "settings") return "资源";
-  return "今晚的书房";
-}
-
 function nextUserId(current: string, users: User[]) {
   if (users.length === 0) return current;
   const index = users.findIndex((user) => user.id === current);
   return users[(index + 1) % users.length].id;
+}
+
+function restartCurrentTrack(audio: HTMLAudioElement | null, setIsPlaying: (value: boolean) => void) {
+  if (!audio) return;
+  audio.currentTime = 0;
+  void audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+}
+
+function finiteDuration(duration: number) {
+  return Number.isFinite(duration) && duration > 0 ? duration : null;
+}
+
+function readingBooks(books: BookItem[]) {
+  const activeBooks = books.filter((book) => book.recentReadAt || book.progress > 0 || book.cfi);
+  return (activeBooks.length > 0 ? activeBooks : books)
+    .slice()
+    .sort((a, b) => dateValue(b.recentReadAt ?? b.updatedAt) - dateValue(a.recentReadAt ?? a.updatedAt));
+}
+
+function sortBooksForMode(books: BookItem[], mode: "recent" | "added" | "bookmarked" | "unfinished") {
+  const candidates =
+    mode === "bookmarked"
+      ? books.filter((book) => book.bookmarkCount > 0)
+      : mode === "unfinished"
+        ? books.filter((book) => Math.round(book.progress) < 100)
+        : books;
+  return candidates.slice().sort((a, b) => {
+    if (mode === "added") return dateValue(b.createdAt) - dateValue(a.createdAt);
+    if (mode === "bookmarked") {
+      return b.bookmarkCount - a.bookmarkCount || dateValue(b.recentReadAt ?? b.updatedAt) - dateValue(a.recentReadAt ?? a.updatedAt);
+    }
+    return dateValue(b.recentReadAt ?? b.updatedAt) - dateValue(a.recentReadAt ?? a.updatedAt);
+  });
+}
+
+function dateValue(value: string | null | undefined) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function calendarDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function calendarWeeks(weekCount: number) {
+  const today = new Date();
+  const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const currentWeekStart = new Date(end);
+  currentWeekStart.setDate(end.getDate() - end.getDay());
+  const start = new Date(currentWeekStart);
+  start.setDate(currentWeekStart.getDate() - (weekCount - 1) * 7);
+
+  return Array.from({ length: weekCount }, (_, weekIndex) =>
+    Array.from({ length: 7 }, (_, dayIndex) => {
+      const date = new Date(start);
+      date.setDate(start.getDate() + weekIndex * 7 + dayIndex);
+      if (date > end) return null;
+      return date;
+    })
+  );
+}
+
+function readingLevel(seconds: number) {
+  if (seconds >= 3600) return 4;
+  if (seconds >= 1800) return 3;
+  if (seconds >= 600) return 2;
+  if (seconds > 0) return 1;
+  return 0;
+}
+
+function totalReadingSeconds(activity: ReadingActivity[], days: number) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days + 1);
+  cutoff.setHours(0, 0, 0, 0);
+  return activity.reduce((total, item) => {
+    const date = new Date(`${item.day}T00:00:00`);
+    return date >= cutoff ? total + item.seconds : total;
+  }, 0);
+}
+
+function activeReadingDays(activity: ReadingActivity[]) {
+  return activity.filter((item) => item.seconds > 0).length;
+}
+
+function formatReadingTime(seconds: number) {
+  const minutes = Math.round(seconds / 60);
+  if (seconds <= 0) return "0 分钟";
+  if (minutes < 1) return "1 分钟";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
 }
 
 function coverBackground(path: string | null | undefined) {
@@ -939,7 +1524,7 @@ function resolveApiBase() {
 }
 
 function formatDuration(duration: number | null) {
-  if (!duration || Number.isNaN(duration)) return "0:00";
+  if (!duration || !Number.isFinite(duration)) return "0:00";
   const minutes = Math.floor(duration / 60);
   const seconds = Math.floor(duration % 60).toString().padStart(2, "0");
   return `${minutes}:${seconds}`;
@@ -955,6 +1540,26 @@ function currentLyric(lines: LyricLine[], position: number) {
     else break;
   }
   return active;
+}
+
+function progressFromLocation(location: Location, fallback: number) {
+  const percentage = location.start.percentage;
+  if (Number.isFinite(percentage) && percentage > 0) {
+    return Math.round(percentage * 100);
+  }
+  return fallback;
+}
+
+function readerSpreadForElement(element: HTMLElement | null) {
+  const width = element?.clientWidth || window.innerWidth;
+  const height = element?.clientHeight || window.innerHeight;
+  return width >= 980 && width / Math.max(height, 1) >= 1.25 ? "always" : "none";
+}
+
+function readReaderFontSize() {
+  const stored = Number(window.localStorage.getItem("shufang.readerFontSize"));
+  if (Number.isFinite(stored)) return Math.min(Math.max(stored, 16), 30);
+  return 22;
 }
 
 function playModeLabel(mode: PlayMode) {
@@ -975,17 +1580,22 @@ async function loadBookmarks(bookId: string, userId: string, setBookmarks: (item
   setBookmarks(items);
 }
 
-function applyReaderTheme(rendition: Rendition, theme: Theme) {
+function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) {
   rendition.themes.register("shufang-day", {
     "html, body": {
       color: "#2f2923",
       background: "#fbf4e9",
       "font-family": "Georgia, 'Songti SC', serif",
-      "line-height": "1.85",
-      "font-size": "18px"
+      "line-height": "1.72",
+      "font-size": `${fontSize}px`
+    },
+    body: {
+      margin: "0 !important",
+      padding: "0 4% !important"
     },
     "body *": { color: "#2f2923 !important", "background-color": "transparent !important" },
-    "p, div": { "line-height": "1.85" },
+    "p, div": { "line-height": "1.72" },
+    img: { "max-width": "100% !important", "height": "auto !important" },
     a: { color: "#2a8278 !important" }
   });
   rendition.themes.register("shufang-night", {
@@ -993,11 +1603,16 @@ function applyReaderTheme(rendition: Rendition, theme: Theme) {
       color: "#efe3d0",
       background: "#171615",
       "font-family": "Georgia, 'Songti SC', serif",
-      "line-height": "1.85",
-      "font-size": "18px"
+      "line-height": "1.72",
+      "font-size": `${fontSize}px`
+    },
+    body: {
+      margin: "0 !important",
+      padding: "0 4% !important"
     },
     "body *": { color: "#efe3d0 !important", "background-color": "transparent !important" },
-    "p, div": { "line-height": "1.85" },
+    "p, div": { "line-height": "1.72" },
+    img: { "max-width": "100% !important", "height": "auto !important" },
     a: { color: "#79d9cb !important" }
   });
   rendition.themes.select(theme === "day" ? "shufang-day" : "shufang-night");

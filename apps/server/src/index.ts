@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -62,15 +62,26 @@ app.get<{ Querystring: { userId?: string } }>("/api/books", async (request) => {
         b.author,
         b.cover_path AS coverPath,
         b.description,
+        b.file_type AS format,
+        b.created_at AS createdAt,
+        b.updated_at AS updatedAt,
         COALESCE(p.percentage, 0) AS progress,
         p.cfi,
-        p.chapter_title AS chapterTitle
+        p.chapter_title AS chapterTitle,
+        p.updated_at AS recentReadAt,
+        COALESCE(bm.bookmark_count, 0) AS bookmarkCount
       FROM books b
       LEFT JOIN book_progress p ON p.book_id = b.id AND p.user_id = ?
-      ORDER BY b.updated_at DESC
+      LEFT JOIN (
+        SELECT book_id, COUNT(*) AS bookmark_count
+        FROM bookmarks
+        WHERE user_id = ?
+        GROUP BY book_id
+      ) bm ON bm.book_id = b.id
+      ORDER BY COALESCE(p.updated_at, b.updated_at) DESC, b.updated_at DESC
     `
     )
-    .all(userId);
+    .all(userId, userId);
 });
 
 app.get<{ Params: { bookId: string } }>("/api/books/:bookId/file", async (request, reply) => {
@@ -78,12 +89,10 @@ app.get<{ Params: { bookId: string } }>("/api/books/:bookId/file", async (reques
     | { filePath: string }
     | undefined;
   if (!book) return reply.code(404).send({ error: "book_not_found" });
-  await ensureFile(book.filePath);
-  reply.header("Content-Type", "application/epub+zip");
-  reply.header("Content-Disposition", `attachment; filename="${encodeURIComponent(book.filePath.split("/").pop() ?? "book.epub")}"`);
+  reply.header("Content-Type", bookContentType(book.filePath));
+  reply.header("Content-Disposition", `inline; filename*=UTF-8''${encodeURIComponent(book.filePath.split("/").pop() ?? "book.epub")}`);
   reply.header("Cache-Control", "public, max-age=31536000, immutable");
-  reply.header("Accept-Ranges", "bytes");
-  return reply.send(createReadStream(book.filePath));
+  return streamFileWithRange(book.filePath, request.headers.range, reply);
 });
 
 app.put<{
@@ -103,6 +112,39 @@ app.put<{
       updated_at = CURRENT_TIMESTAMP
   `).run({ userId, bookId, cfi, percentage, chapterTitle: chapterTitle ?? null });
 
+  return { ok: true };
+});
+
+app.get<{ Querystring: { userId?: string; days?: string } }>("/api/reading/activity", async (request) => {
+  const userId = request.query.userId ?? "u-1";
+  const requestedDays = Number(request.query.days ?? 180);
+  const days = Number.isFinite(requestedDays) ? Math.max(Math.floor(requestedDays), 1) : 180;
+  return db
+    .prepare(
+      `
+      SELECT day, seconds
+      FROM reading_activity
+      WHERE user_id = ?
+        AND day >= date('now', ?)
+      ORDER BY day ASC
+    `
+    )
+    .all(userId, `-${days - 1} days`);
+});
+
+app.post<{
+  Body: { userId: string; seconds: number; day?: string };
+}>("/api/reading/activity", async (request) => {
+  const seconds = Math.max(0, Math.min(Math.round(request.body.seconds || 0), 3600));
+  if (seconds === 0) return { ok: true };
+  const day = request.body.day ?? new Date().toISOString().slice(0, 10);
+  db.prepare(`
+    INSERT INTO reading_activity (user_id, day, seconds, updated_at)
+    VALUES (@userId, @day, @seconds, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id, day) DO UPDATE SET
+      seconds = seconds + excluded.seconds,
+      updated_at = CURRENT_TIMESTAMP
+  `).run({ userId: request.body.userId, day, seconds });
   return { ok: true };
 });
 
@@ -158,9 +200,9 @@ app.get<{ Params: { trackId: string } }>("/api/audio/:trackId/stream", async (re
     | { filePath: string }
     | undefined;
   if (!track) return reply.code(404).send({ error: "track_not_found" });
-  await ensureFile(track.filePath);
   reply.header("Content-Type", audioContentType(track.filePath));
-  return reply.send(createReadStream(track.filePath));
+  reply.header("Cache-Control", "public, max-age=31536000, immutable");
+  return streamFileWithRange(track.filePath, request.headers.range, reply);
 });
 
 app.get<{ Params: { trackId: string } }>("/api/audio/:trackId/lyrics", async (request, reply) => {
@@ -214,14 +256,52 @@ function count(table: string, where?: string) {
 async function ensureFile(filePath: string) {
   const fileStat = await stat(filePath);
   if (!fileStat.isFile()) throw new Error("Not a file");
+  return fileStat;
+}
+
+async function streamFileWithRange(filePath: string, rangeHeader: string | undefined, reply: FastifyReply) {
+  const fileStat = await ensureFile(filePath);
+  reply.header("Accept-Ranges", "bytes");
+  const range = parseRangeHeader(rangeHeader, fileStat.size);
+  if (range) {
+    reply.code(206);
+    reply.header("Content-Range", `bytes ${range.start}-${range.end}/${fileStat.size}`);
+    reply.header("Content-Length", String(range.end - range.start + 1));
+    return reply.send(createReadStream(filePath, range));
+  }
+  reply.header("Content-Length", String(fileStat.size));
+  return reply.send(createReadStream(filePath));
+}
+
+function parseRangeHeader(rangeHeader: string | undefined, fileSize: number) {
+  if (!rangeHeader) return null;
+  const match = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
+  if (!match) return null;
+
+  let start = match[1] ? Number(match[1]) : 0;
+  let end = match[2] ? Number(match[2]) : fileSize - 1;
+  if (!match[1] && match[2]) {
+    const suffixLength = Number(match[2]);
+    start = Math.max(fileSize - suffixLength, 0);
+    end = fileSize - 1;
+  }
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= fileSize) {
+    return null;
+  }
+  return { start, end: Math.min(end, fileSize - 1) };
 }
 
 function audioContentType(filePath: string) {
-  if (filePath.endsWith(".flac")) return "audio/flac";
-  if (filePath.endsWith(".wav")) return "audio/wav";
-  if (filePath.endsWith(".ogg") || filePath.endsWith(".opus")) return "audio/ogg";
-  if (filePath.endsWith(".m4a") || filePath.endsWith(".aac") || filePath.endsWith(".alac")) return "audio/mp4";
+  const extension = extname(filePath).toLowerCase();
+  if (extension === ".flac") return "audio/flac";
+  if (extension === ".wav") return "audio/wav";
+  if (extension === ".ogg" || extension === ".opus") return "audio/ogg";
+  if (extension === ".m4a" || extension === ".aac" || extension === ".alac") return "audio/mp4";
   return "audio/mpeg";
+}
+
+function bookContentType(filePath: string) {
+  return extname(filePath).toLowerCase() === ".pdf" ? "application/pdf" : "application/epub+zip";
 }
 
 function parseLyrics(text: string) {
