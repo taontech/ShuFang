@@ -1,10 +1,11 @@
 import type Database from "better-sqlite3";
 import { XMLParser } from "fast-xml-parser";
 import JSZip from "jszip";
-import { parseFile } from "music-metadata";
+import { parseFile, parseStream } from "music-metadata";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { getSmbClient, smbExists, smbReadFile, smbCreateReadStream, walkSmb } from "./smb.js";
 
 const bookExtensions = new Set([".epub", ".pdf"]);
 const audioExtensions = new Set([".mp3", ".m4a", ".aac", ".flac", ".alac", ".wav", ".ogg", ".opus"]);
@@ -27,8 +28,13 @@ export async function scanLibrary(db: Database.Database): Promise<ScanResult> {
   const roots = db
     .prepare("SELECT id, path FROM scan_roots WHERE enabled = 1 ORDER BY created_at")
     .all() as Array<{ id: string; path: string }>;
-  const result: ScanResult = { roots: roots.length, files: 0, books: 0, audio: 0, skipped: 0, errors: [] };
+  const smbRoots = db
+    .prepare("SELECT id, host, port, username, password, share_name AS shareName, path FROM smb_roots WHERE enabled = 1 ORDER BY created_at")
+    .all() as Array<{ id: string; host: string; port: number; username?: string; password?: string; shareName: string; path: string }>;
 
+  const result: ScanResult = { roots: roots.length + smbRoots.length, files: 0, books: 0, audio: 0, skipped: 0, errors: [] };
+
+  // Scan local roots
   for (const root of roots) {
     const rootPath = resolve(root.path);
     try {
@@ -52,6 +58,51 @@ export async function scanLibrary(db: Database.Database): Promise<ScanResult> {
       db.prepare("UPDATE scan_roots SET last_scanned_at = CURRENT_TIMESTAMP WHERE id = ?").run(root.id);
     } catch (error) {
       result.errors.push({ file: rootPath, message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  // Scan SMB roots
+  for (const smbRoot of smbRoots) {
+    let client;
+    try {
+      client = getSmbClient({
+        host: smbRoot.host,
+        port: smbRoot.port,
+        username: smbRoot.username || undefined,
+        password: smbRoot.password || undefined,
+        shareName: smbRoot.shareName
+      });
+
+      for await (const file of walkSmb(client, smbRoot.path)) {
+        result.files += 1;
+        const extension = extname(file.path).toLowerCase();
+        const smbUri = `smb://${smbRoot.host}/${smbRoot.shareName}/${file.path}`;
+
+        try {
+          if (bookExtensions.has(extension)) {
+            await upsertBookSmb(db, client, smbUri, file.path);
+            result.books += 1;
+          } else if (audioExtensions.has(extension)) {
+            await upsertAudioSmb(db, client, smbUri, file.path, file.size);
+            result.audio += 1;
+          } else {
+            result.skipped += 1;
+          }
+        } catch (error) {
+          result.errors.push({ file: smbUri, message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      db.prepare("UPDATE smb_roots SET last_scanned_at = CURRENT_TIMESTAMP WHERE id = ?").run(smbRoot.id);
+    } catch (error) {
+      const rootUri = `smb://${smbRoot.host}/${smbRoot.shareName}/${smbRoot.path}`;
+      result.errors.push({ file: rootUri, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (client) {
+        try {
+          client.close();
+        } catch {}
+      }
     }
   }
 
@@ -245,7 +296,137 @@ async function findFolderCover(filePath: string) {
 }
 
 function stableId(value: string) {
+  if (value.startsWith("smb://")) {
+    return createHash("sha1").update(value).digest("hex");
+  }
   return createHash("sha1").update(resolve(value)).digest("hex");
+}
+
+async function upsertBookSmb(db: Database.Database, client: any, smbUri: string, remotePath: string) {
+  const extension = extname(remotePath).toLowerCase();
+  let metadata;
+  if (extension === ".pdf") {
+    metadata = {
+      title: basename(remotePath, extension),
+      author: null,
+      language: null,
+      description: null,
+      coverPath: null,
+      fileType: "pdf"
+    };
+  } else {
+    metadata = await readEpubMetadataSmb(client, remotePath, smbUri);
+  }
+
+  db.prepare(`
+    INSERT INTO books (id, file_path, title, author, cover_path, description, language, file_type, updated_at)
+    VALUES (@id, @filePath, @title, @author, @coverPath, @description, @language, @fileType, CURRENT_TIMESTAMP)
+    ON CONFLICT(file_path) DO UPDATE SET
+      title = excluded.title,
+      author = excluded.author,
+      cover_path = COALESCE(excluded.cover_path, books.cover_path),
+      description = excluded.description,
+      language = excluded.language,
+      file_type = excluded.file_type,
+      updated_at = CURRENT_TIMESTAMP
+  `).run({
+    id: stableId(smbUri),
+    filePath: smbUri,
+    title: metadata.title,
+    author: metadata.author,
+    coverPath: metadata.coverPath,
+    description: metadata.description,
+    language: metadata.language,
+    fileType: metadata.fileType
+  });
+}
+
+async function readEpubMetadataSmb(client: any, remotePath: string, smbUri: string) {
+  const buffer = await smbReadFile(client, remotePath);
+  const zip = await JSZip.loadAsync(buffer);
+  const containerFile = zip.file("META-INF/container.xml");
+  if (!containerFile) {
+    throw new Error("EPUB 缺少 container.xml");
+  }
+
+  const container = parser.parse(await containerFile.async("text"));
+  const rootfile = first(container?.container?.rootfiles?.rootfile);
+  const opfPath = rootfile?.["@_full-path"];
+  if (!opfPath || !zip.file(opfPath)) {
+    throw new Error("EPUB 缺少 OPF 元数据");
+  }
+
+  const opf = parser.parse(await zip.file(opfPath)!.async("text"));
+  const metadata = opf?.package?.metadata ?? {};
+  const manifest = arrayOf(opf?.package?.manifest?.item);
+  const title = textValue(first(metadata["dc:title"])) ?? basename(remotePath, extname(remotePath));
+  const author = textValue(first(metadata["dc:creator"]));
+  const language = textValue(first(metadata["dc:language"]));
+  const description = textValue(first(metadata["dc:description"]));
+  const coverHref = findCoverHref(metadata, manifest);
+  const coverPath = coverHref ? await extractEpubCover(zip, opfPath, coverHref, smbUri) : null;
+
+  return { title, author, language, description, coverPath, fileType: "epub" };
+}
+
+async function upsertAudioSmb(db: Database.Database, client: any, smbUri: string, remotePath: string, fileSize: number) {
+  const extension = extname(remotePath).toLowerCase();
+  const stream = await smbCreateReadStream(client, remotePath);
+  const metadata = await parseStream(stream, { mimeType: audioContentType(remotePath), size: fileSize });
+  const common = metadata.common;
+  const coverPath = common.picture?.[0]
+    ? await writeCoverAsset(smbUri, common.picture[0].data, mimeExtension(common.picture[0].format))
+    : await findFolderCoverSmb(client, remotePath, smbUri);
+  const kind = /podcast|播客|有声|audiobook/i.test(`${common.genre?.join(" ")} ${dirname(remotePath)}`) ? "podcast" : "music";
+
+  db.prepare(`
+    INSERT INTO audio_tracks (id, file_path, title, artist, album, duration, cover_path, kind, updated_at)
+    VALUES (@id, @filePath, @title, @artist, @album, @duration, @coverPath, @kind, CURRENT_TIMESTAMP)
+    ON CONFLICT(file_path) DO UPDATE SET
+      title = excluded.title,
+      artist = excluded.artist,
+      album = excluded.album,
+      duration = excluded.duration,
+      cover_path = excluded.cover_path,
+      kind = excluded.kind,
+      updated_at = CURRENT_TIMESTAMP
+  `).run({
+    id: stableId(smbUri),
+    filePath: smbUri,
+    title: common.title ?? basename(remotePath, extension),
+    artist: common.artist ?? common.albumartist ?? null,
+    album: common.album ?? null,
+    duration: metadata.format.duration ?? null,
+    coverPath,
+    kind
+  });
+}
+
+async function findFolderCoverSmb(client: any, remotePath: string, smbUri: string) {
+  const names = ["cover.jpg", "cover.png", "folder.jpg", "folder.png", "front.jpg", "front.png"];
+  const dir = dirname(remotePath);
+  for (const name of names) {
+    const coverRemotePath = dir === "." || dir === "" ? name : `${dir}/${name}`;
+    try {
+      if (await smbExists(client, coverRemotePath)) {
+        const coverBuffer = await smbReadFile(client, coverRemotePath);
+        const coverUri = `${dirname(smbUri)}/${name}`;
+        return await writeCoverAsset(coverUri, coverBuffer, extname(name));
+      }
+    } catch {
+      // Keep looking
+    }
+  }
+  return null;
+}
+
+function audioContentType(filePath: string) {
+  const extension = extname(filePath).toLowerCase();
+  if (extension === ".flac") return "audio/flac";
+  if (extension === ".wav") return "audio/wav";
+  if (extension === ".ogg" || extension === ".opus") return "audio/ogg";
+  if (extension === ".m4a" || extension === ".aac" || extension === ".alac") return "audio/mp4";
+  return "audio/mpeg";
 }
 
 function mimeExtension(mime: string) {

@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@fastify/static": "^7.0.4",
+    "@fastify/websocket": "^8.3.1",
+    "@marsaud/smb2": "^0.18.0",
     "better-sqlite3": "^11.1.2",
     "chokidar": "^3.6.0",
     "fast-xml-parser": "^5.8.0",

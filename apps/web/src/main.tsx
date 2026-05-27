@@ -34,8 +34,10 @@ import {
   UserRound,
   Plus,
   X,
-  Menu
+  Menu,
+  Network
 } from "lucide-react";
+
 import { AnimatePresence, motion } from "framer-motion";
 import "./styles/app.css";
 
@@ -86,6 +88,19 @@ type ScanRoot = {
   lastScannedAt: string | null;
 };
 
+type SmbRoot = {
+  id: string;
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  shareName: string;
+  path: string;
+  enabled: number;
+  lastScannedAt: string | null;
+  createdAt: string;
+};
+
 type BookmarkItem = {
   id: string;
   bookId: string;
@@ -113,7 +128,9 @@ function App() {
   const [books, setBooks] = useState<BookItem[]>([]);
   const [music, setMusic] = useState<AudioTrack[]>([]);
   const [podcasts, setPodcasts] = useState<AudioTrack[]>([]);
+  const queue = useMemo(() => [...music, ...podcasts], [music, podcasts]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
+  const [smbRoots, setSmbRoots] = useState<SmbRoot[]>([]);
   const [readingActivity, setReadingActivity] = useState<ReadingActivity[]>([]);
   const [activeBookId, setActiveBookId] = useState<string | null>(null);
   const [activeUserId, setActiveUserId] = useState(() => {
@@ -136,6 +153,40 @@ function App() {
   const previousViewRef = useRef<View>("books");
   const returningFromReaderRef = useRef(false);
 
+  const [isSyncEnabled, setIsSyncEnabled] = useState(true);
+  const [showSyncDialog, setShowSyncDialog] = useState(false);
+  const [pendingSession, setPendingSession] = useState<{ trackId: string; position: number; isPlaying: boolean } | null>(null);
+
+  const clientId = useMemo(() => {
+    let id = localStorage.getItem("shufang.clientId");
+    if (!id) {
+      id = Math.random().toString(36).substring(2) + Date.now().toString(36);
+      localStorage.setItem("shufang.clientId", id);
+    }
+    return id;
+  }, []);
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const isApplyingWsUpdateRef = useRef(false);
+  const lastSentPositionRef = useRef(0);
+  const lastSentTimeRef = useRef(0);
+
+  const sendWsMessage = (type: string, payload: { trackId?: string; position?: number; isPlaying?: boolean }) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!isSyncEnabled) return;
+    if (isApplyingWsUpdateRef.current) return;
+
+    wsRef.current.send(
+      JSON.stringify({
+        type,
+        clientId,
+        trackId: payload.trackId ?? currentTrack?.id,
+        position: payload.position ?? audioPosition,
+        isPlaying: payload.isPlaying ?? isPlaying
+      })
+    );
+  };
+
   const activeBook = useMemo(
     () => books.find((book) => book.id === activeBookId) ?? null,
     [activeBookId, books]
@@ -145,6 +196,143 @@ function App() {
     name: "访客",
     avatar: "👤",
     role: "member"
+  };
+
+  useEffect(() => {
+    const wsUrl = `${resolveWsBase()}/ws/sync`;
+    let ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    const setupWs = () => {
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          const { type, clientId: msgClientId, trackId, position, isPlaying: msgIsPlaying } = message;
+
+          if (msgClientId === clientId) return;
+
+          if (type === "SESSION_STATE") {
+            if (message.hasOtherClients) {
+              setPendingSession({ trackId, position, isPlaying: msgIsPlaying });
+            } else {
+              const track = queue.find((t) => t.id === trackId);
+              if (track) {
+                isApplyingWsUpdateRef.current = true;
+                setCurrentTrack(track);
+                setIsPlaying(msgIsPlaying);
+                setIsSyncEnabled(true);
+                setTimeout(() => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = position;
+                    setAudioPosition(position);
+                  }
+                  isApplyingWsUpdateRef.current = false;
+                }, 100);
+              }
+            }
+          } else if (isSyncEnabled) {
+            isApplyingWsUpdateRef.current = true;
+
+            if (type === "TRACK_CHANGE") {
+              const track = queue.find((t) => t.id === trackId);
+              if (track) {
+                setCurrentTrack(track);
+                setIsPlaying(msgIsPlaying);
+                if (audioRef.current) {
+                  audioRef.current.currentTime = position;
+                  setAudioPosition(position);
+                }
+              }
+            } else if (type === "PLAY") {
+              setIsPlaying(true);
+              if (audioRef.current) {
+                if (Math.abs(audioRef.current.currentTime - position) > 2) {
+                  audioRef.current.currentTime = position;
+                  setAudioPosition(position);
+                }
+              }
+            } else if (type === "PAUSE") {
+              setIsPlaying(false);
+              if (audioRef.current) {
+                if (Math.abs(audioRef.current.currentTime - position) > 2) {
+                  audioRef.current.currentTime = position;
+                  setAudioPosition(position);
+                }
+              }
+            } else if (type === "SEEK") {
+              if (audioRef.current) {
+                audioRef.current.currentTime = position;
+                setAudioPosition(position);
+              }
+            }
+
+            setTimeout(() => {
+              isApplyingWsUpdateRef.current = false;
+            }, 500);
+          }
+        } catch (err) {
+          console.error("Failed to parse websocket message", err);
+        }
+      };
+
+      ws.onclose = () => {
+        setTimeout(() => {
+          if (wsRef.current === ws) {
+            let nextWs = new WebSocket(wsUrl);
+            wsRef.current = nextWs;
+            ws = nextWs;
+            setupWs();
+          }
+        }, 3000);
+      };
+    };
+
+    setupWs();
+
+    return () => {
+      ws.onclose = null;
+      ws.close();
+    };
+  }, [clientId, queue, isSyncEnabled]);
+
+  useEffect(() => {
+    if (pendingSession && !showSyncDialog) {
+      const track = queue.find((t) => t.id === pendingSession.trackId);
+      if (track) {
+        setShowSyncDialog(true);
+      }
+    }
+  }, [queue, pendingSession, showSyncDialog]);
+
+  const joinSync = () => {
+    if (pendingSession) {
+      const track = queue.find((t) => t.id === pendingSession.trackId);
+      if (track) {
+        isApplyingWsUpdateRef.current = true;
+        setCurrentTrack(track);
+        setIsPlaying(true);
+        setIsSyncEnabled(true);
+
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.currentTime = pendingSession.position;
+            setAudioPosition(pendingSession.position);
+            void audioRef.current.play().catch((err) => {
+              console.error("Autoplay failed:", err);
+            });
+          }
+          isApplyingWsUpdateRef.current = false;
+        }, 150);
+      }
+    }
+    setShowSyncDialog(false);
+    setPendingSession(null);
+  };
+
+  const declineSync = () => {
+    setShowSyncDialog(false);
+    setPendingSession(null);
+    setIsSyncEnabled(false);
   };
 
   useEffect(() => {
@@ -203,18 +391,20 @@ function App() {
   }, [lyrics, audioPosition]);
 
   const refreshAll = async (userId = activeUserId) => {
-    const [nextUsers, nextBooks, nextMusic, nextPodcasts, nextRoots] = await Promise.all([
+    const [nextUsers, nextBooks, nextMusic, nextPodcasts, nextRoots, nextSmbRoots] = await Promise.all([
       api<User[]>("/api/users"),
       api<BookItem[]>(`/api/books?userId=${encodeURIComponent(userId)}`),
       api<AudioTrack[]>("/api/audio?kind=music"),
       api<AudioTrack[]>("/api/audio?kind=podcast"),
-      api<ScanRoot[]>("/api/roots")
+      api<ScanRoot[]>("/api/roots"),
+      api<SmbRoot[]>("/api/roots/smb")
     ]);
     setUsers(nextUsers);
     setBooks(nextBooks);
     setMusic(nextMusic);
     setPodcasts(nextPodcasts);
     setRoots(nextRoots);
+    setSmbRoots(nextSmbRoots);
     await refreshReadingActivity(userId);
   };
 
@@ -243,6 +433,29 @@ function App() {
           : book
       )
     );
+  };
+
+  const clearBookProgress = async (bookId: string) => {
+    try {
+      await api(`/api/books/${bookId}/progress?userId=${encodeURIComponent(activeUserId)}`, {
+        method: "DELETE"
+      });
+      setBooks((currentBooks) =>
+        currentBooks.map((book) =>
+          book.id === bookId
+            ? {
+                ...book,
+                cfi: null,
+                progress: 0,
+                chapterTitle: null,
+                recentReadAt: null
+              }
+            : book
+        )
+      );
+    } catch (err) {
+      console.error("Failed to clear book progress:", err);
+    }
   };
 
   const updateBookCover = (bookId: string, coverPath: string) => {
@@ -276,9 +489,9 @@ function App() {
   const playTrack = (track: AudioTrack) => {
     setCurrentTrack(track);
     setIsPlaying(true);
+    sendWsMessage("TRACK_CHANGE", { trackId: track.id, position: 0, isPlaying: true });
   };
 
-  const queue = useMemo(() => [...music, ...podcasts], [music, podcasts]);
 
   const playNextTrack = () => {
     if (queue.length === 0) return;
@@ -313,6 +526,7 @@ function App() {
     const duration = finiteDuration(audioRef.current.duration) ?? audioDuration;
     audioRef.current.currentTime = duration ? Math.min(position, duration) : position;
     setAudioPosition(position);
+    sendWsMessage("SEEK", { position });
   };
 
   const runScan = async () => {
@@ -412,12 +626,36 @@ function App() {
                 goMusic={() => navigateTo("music")}
                 goSettings={() => navigateTo("settings")}
                 onCoverExtracted={updateBookCover}
+                onClearProgress={clearBookProgress}
               />
             )}
-            {view === "books" && <BooksView books={books} openBook={openBook} goSettings={() => navigateTo("settings")} onCoverExtracted={updateBookCover} />}
-            {view === "music" && <AudioView kind="music" tracks={music} playTrack={playTrack} />}
+            {view === "books" && (
+              <BooksView
+                books={books}
+                openBook={openBook}
+                goSettings={() => navigateTo("settings")}
+                onCoverExtracted={updateBookCover}
+                onClearProgress={clearBookProgress}
+              />
+            )}
+            {view === "music" && (
+              <AudioView
+                kind="music"
+                tracks={music}
+                playTrack={playTrack}
+                currentTrack={currentTrack}
+                isPlaying={isPlaying}
+              />
+            )}
             {view === "settings" && (
-              <SettingsView roots={roots} runScan={runScan} isScanning={isScanning} message={message} refresh={refreshAll} />
+              <SettingsView
+                roots={roots}
+                smbRoots={smbRoots}
+                runScan={runScan}
+                isScanning={isScanning}
+                message={message}
+                refresh={refreshAll}
+              />
             )}
           </motion.section>
         </AnimatePresence>
@@ -428,11 +666,30 @@ function App() {
         src={currentTrack ? `${API_BASE}/api/audio/${currentTrack.id}/stream` : undefined}
         loop={playMode === "repeat-one"}
         preload="metadata"
-        onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onPlay={() => {
+          setIsPlaying(true);
+          sendWsMessage("PLAY", { isPlaying: true });
+        }}
+        onPause={() => {
+          setIsPlaying(false);
+          sendWsMessage("PAUSE", { isPlaying: false });
+        }}
         onLoadedMetadata={(event) => setAudioDuration(finiteDuration(event.currentTarget.duration) ?? currentTrack?.duration ?? 0)}
         onDurationChange={(event) => setAudioDuration(finiteDuration(event.currentTarget.duration) ?? currentTrack?.duration ?? 0)}
-        onTimeUpdate={(event) => setAudioPosition(event.currentTarget.currentTime)}
+        onTimeUpdate={(event) => {
+          const currentTime = event.currentTarget.currentTime;
+          setAudioPosition(currentTime);
+
+          // Throttle progress updates: send every 2 seconds during playback
+          const now = Date.now();
+          if (isPlaying && now - lastSentTimeRef.current > 2000) {
+            if (Math.abs(currentTime - lastSentPositionRef.current) > 1) {
+              sendWsMessage("PLAY", { position: currentTime, isPlaying: true });
+              lastSentPositionRef.current = currentTime;
+              lastSentTimeRef.current = now;
+            }
+          }
+        }}
         onEnded={playNextTrack}
       />
       <GlobalPlayer
@@ -483,6 +740,14 @@ function App() {
           />
         )}
       </AnimatePresence>
+      <AnimatePresence>
+        {showSyncDialog && (
+          <SyncConfirmationModal
+            onConfirm={joinSync}
+            onDecline={declineSync}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -510,7 +775,8 @@ function HomeView({
   goBooks,
   goMusic,
   goSettings,
-  onCoverExtracted
+  onCoverExtracted,
+  onClearProgress
 }: {
   books: BookItem[];
   tracks: AudioTrack[];
@@ -521,6 +787,7 @@ function HomeView({
   goMusic: () => void;
   goSettings: () => void;
   onCoverExtracted?: (bookId: string, coverPath: string) => void;
+  onClearProgress?: (bookId: string) => void;
 }) {
   const heroBook = books[0];
   const recentBooks = readingBooks(books).slice(0, 10);
@@ -566,7 +833,13 @@ function HomeView({
         <SectionTitle icon={<Bookmark size={18} />} title="正在阅读" actionLabel="更多" onAction={goBooks} />
         <div className="book-row">
           {recentBooks.map((book) => (
-            <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} onCoverExtracted={onCoverExtracted} />
+            <BookCard
+              key={book.id}
+              book={book}
+              onOpen={() => openBook(book.id)}
+              onCoverExtracted={onCoverExtracted}
+              onClearProgress={onClearProgress ? () => onClearProgress(book.id) : undefined}
+            />
           ))}
         </div>
       </section>
@@ -669,12 +942,14 @@ function BooksView({
   books,
   openBook,
   goSettings,
-  onCoverExtracted
+  onCoverExtracted,
+  onClearProgress
 }: {
   books: BookItem[];
   openBook: (bookId: string) => void;
   goSettings: () => void;
   onCoverExtracted?: (bookId: string, coverPath: string) => void;
+  onClearProgress?: (bookId: string) => void;
 }) {
   const [mode, setMode] = useState<"recent" | "added" | "bookmarked" | "unfinished">("recent");
   if (books.length === 0) return <EmptyLibrary goSettings={goSettings} />;
@@ -698,7 +973,13 @@ function BooksView({
       </div>
       <div className="book-grid">
         {visibleBooks.map((book) => (
-          <BookCard key={book.id} book={book} onOpen={() => openBook(book.id)} onCoverExtracted={onCoverExtracted} />
+          <BookCard
+            key={book.id}
+            book={book}
+            onOpen={() => openBook(book.id)}
+            onCoverExtracted={onCoverExtracted}
+            onClearProgress={onClearProgress ? () => onClearProgress(book.id) : undefined}
+          />
         ))}
       </div>
     </div>
@@ -1393,25 +1674,74 @@ function PdfPageCanvas({
 function AudioView({
   kind,
   tracks,
-  playTrack
+  playTrack,
+  currentTrack,
+  isPlaying
 }: {
   kind: "music" | "podcasts";
   tracks: AudioTrack[];
   playTrack: (track: AudioTrack) => void;
+  currentTrack: AudioTrack | null;
+  isPlaying: boolean;
 }) {
+  const coverUrl = currentTrack?.coverPath ? coverBackground(currentTrack.coverPath) : undefined;
+
   return (
-    <div className="audio-library">
-      <div className="audio-hero">
-        <div className="vinyl">
-          <Music2 size={42} />
+    <div className="audio-library-v2">
+      {/* Left Premium Card */}
+      <div className="premium-player-card">
+        <div className="vinyl-wrapper">
+          <div className="vinyl-glow" style={{ backgroundImage: coverUrl }} />
+          <div className={`vinyl-disc ${isPlaying && currentTrack ? "spinning" : ""}`}>
+            <div className="vinyl-grooves" />
+            <div className="vinyl-label" style={{ backgroundImage: coverUrl || "linear-gradient(135deg, #111, #333)" }}>
+              {!coverUrl && <Music2 size={24} className="vinyl-default-icon" />}
+            </div>
+            <div className="vinyl-center-dot" />
+          </div>
+          <div className={`vinyl-tonearm ${isPlaying && currentTrack ? "playing" : ""}`}>
+            <div className="tonearm-base" />
+            <div className="tonearm-arm" />
+            <div className="tonearm-head" />
+          </div>
         </div>
-        <div>
-          <p className="eyebrow">{kind === "music" ? "本地高清音乐" : "播客与有声内容"}</p>
-          <h2>{kind === "music" ? "音乐库" : "继续收听"}</h2>
-          <p>直接播放本地文件，切换到书架或阅读器时不中断。</p>
+
+        <div className="premium-player-info">
+          <h3>{currentTrack?.title ?? "选择曲目"}</h3>
+          <p>{currentTrack ? [currentTrack.artist, currentTrack.album].filter(Boolean).join(" · ") : "点按右侧列表开启沉浸收听"}</p>
+          <div className={`visualizer-wave ${isPlaying && currentTrack ? "active" : ""}`}>
+            <span className="bar bar-1"></span>
+            <span className="bar bar-2"></span>
+            <span className="bar bar-3"></span>
+            <span className="bar bar-4"></span>
+            <span className="bar bar-5"></span>
+            <span className="bar bar-6"></span>
+            <span className="bar bar-7"></span>
+            <span className="bar bar-8"></span>
+            <span className="bar bar-9"></span>
+            <span className="bar bar-10"></span>
+            <span className="bar bar-11"></span>
+            <span className="bar bar-12"></span>
+          </div>
         </div>
       </div>
-      <TrackList tracks={tracks} playTrack={playTrack} large />
+
+      {/* Right Tracks Panel */}
+      <div className="tracks-panel">
+        <div className="tracks-header">
+          <p className="eyebrow">{kind === "music" ? "本地高清音乐" : "播客与有声内容"}</p>
+          <h2>{kind === "music" ? "音乐馆" : "有声电台"}</h2>
+        </div>
+        <div className="tracks-list-container">
+          <TrackList
+            tracks={tracks}
+            playTrack={playTrack}
+            currentTrackId={currentTrack?.id}
+            isPlaying={isPlaying}
+            large
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -1419,10 +1749,14 @@ function AudioView({
 function TrackList({
   tracks,
   playTrack,
+  currentTrackId,
+  isPlaying = false,
   large = false
 }: {
   tracks: AudioTrack[];
   playTrack: (track: AudioTrack) => void;
+  currentTrackId?: string;
+  isPlaying?: boolean;
   large?: boolean;
 }) {
   if (tracks.length === 0) {
@@ -1431,28 +1765,44 @@ function TrackList({
 
   return (
     <div className={`list-stack ${large ? "wide" : ""}`}>
-      {tracks.map((item) => (
-        <button className={`list-item ${large ? "large" : ""}`} key={item.id} onClick={() => playTrack(item)}>
-          <span className="album-dot cover-dot" style={{ backgroundImage: coverBackground(item.coverPath) }} />
-          <span>
-            <strong>{item.title}</strong>
-            <small>{[item.artist, item.album].filter(Boolean).join(" · ") || item.kind}</small>
-          </span>
-          <em>{formatDuration(item.duration)}</em>
-        </button>
-      ))}
+      {tracks.map((item) => {
+        const isCurrent = item.id === currentTrackId;
+        return (
+          <button
+            className={`list-item ${large ? "large" : ""} ${isCurrent ? "active-track" : ""}`}
+            key={item.id}
+            onClick={() => playTrack(item)}
+          >
+            <span className="album-dot cover-dot" style={{ backgroundImage: coverBackground(item.coverPath) }} />
+            <span>
+              <strong>{item.title}</strong>
+              <small>{[item.artist, item.album].filter(Boolean).join(" · ") || item.kind}</small>
+            </span>
+            {isCurrent && isPlaying ? (
+              <span className="playing-indicator-gif">
+                <span className="playing-bar playing-bar-1"></span>
+                <span className="playing-bar playing-bar-2"></span>
+                <span className="playing-bar playing-bar-3"></span>
+              </span>
+            ) : null}
+            <em>{formatDuration(item.duration)}</em>
+          </button>
+        );
+      })}
     </div>
   );
 }
 
 function SettingsView({
   roots,
+  smbRoots,
   runScan,
   isScanning,
   message,
   refresh
 }: {
   roots: ScanRoot[];
+  smbRoots: SmbRoot[];
   runScan: () => void;
   isScanning: boolean;
   message: string;
@@ -1460,6 +1810,17 @@ function SettingsView({
 }) {
   const [path, setPath] = useState("");
   const [error, setError] = useState("");
+
+  // SMB form state
+  const [smbHost, setSmbHost] = useState("");
+  const [smbPort, setSmbPort] = useState(445);
+  const [smbUsername, setSmbUsername] = useState("");
+  const [smbPassword, setSmbPassword] = useState("");
+  const [smbShareName, setSmbShareName] = useState("");
+  const [smbPath, setSmbPath] = useState("");
+  const [smbError, setSmbError] = useState("");
+  const [smbSuccess, setSmbSuccess] = useState("");
+  const [isTesting, setIsTesting] = useState(false);
 
   const addRoot = async () => {
     setError("");
@@ -1477,10 +1838,75 @@ function SettingsView({
     await refresh();
   };
 
+  const testSmb = async () => {
+    setSmbError("");
+    setSmbSuccess("");
+    if (!smbHost || !smbShareName) {
+      setSmbError("主机名和共享名是必填项");
+      return;
+    }
+    setIsTesting(true);
+    try {
+      await api("/api/roots/smb/test", {
+        method: "POST",
+        body: JSON.stringify({
+          host: smbHost,
+          port: smbPort,
+          username: smbUsername || undefined,
+          password: smbPassword || undefined,
+          shareName: smbShareName,
+          path: smbPath || ""
+        })
+      });
+      setSmbSuccess("测试连接成功！");
+    } catch (requestError) {
+      setSmbError(requestError instanceof Error ? requestError.message : String(requestError));
+    } finally {
+      setIsTesting(false);
+    }
+  };
+
+  const addSmb = async () => {
+    setSmbError("");
+    setSmbSuccess("");
+    if (!smbHost || !smbShareName) {
+      setSmbError("主机名和共享名是必填项");
+      return;
+    }
+    try {
+      await api("/api/roots/smb", {
+        method: "POST",
+        body: JSON.stringify({
+          host: smbHost,
+          port: smbPort,
+          username: smbUsername || undefined,
+          password: smbPassword || undefined,
+          shareName: smbShareName,
+          path: smbPath || ""
+        })
+      });
+      setSmbHost("");
+      setSmbPort(445);
+      setSmbUsername("");
+      setSmbPassword("");
+      setSmbShareName("");
+      setSmbPath("");
+      setSmbSuccess("成功添加 SMB 资源共享！");
+      await refresh();
+    } catch (requestError) {
+      setSmbError(requestError instanceof Error ? requestError.message : String(requestError));
+    }
+  };
+
+  const removeSmbRoot = async (rootId: string) => {
+    await api(`/api/roots/smb/${rootId}`, { method: "DELETE" });
+    await refresh();
+  };
+
   return (
     <div className="settings-layout">
       <section className="settings-panel">
-        <SectionTitle icon={<Folder size={18} />} title="资源路径" />
+        <SectionTitle icon={<Folder size={18} />} title="本地资源路径" />
         <p className="muted-copy">添加包含 EPUB、音乐或播客的本地目录。之后测试和开发都会使用真实资源。</p>
         <div className="path-row">
           <input value={path} onChange={(event) => setPath(event.target.value)} placeholder="/Volumes/Media/Books" />
@@ -1503,9 +1929,68 @@ function SettingsView({
           ))}
         </div>
       </section>
+
+      <section className="settings-panel">
+        <SectionTitle icon={<Network size={18} />} title="网络 SMB 资源共享" />
+        <p className="muted-copy" style={{ marginBottom: "16px" }}>连接远程 SMB 服务器，直接在网络上读取书籍和流式播放音频，无需预先下载文件。</p>
+
+        <div className="smb-form-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>主机 / IP *</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} value={smbHost} onChange={e => setSmbHost(e.target.value)} placeholder="192.168.1.100" />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>端口</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} type="number" value={smbPort} onChange={e => setSmbPort(Number(e.target.value))} placeholder="445" />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>共享名 (Share) *</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} value={smbShareName} onChange={e => setSmbShareName(e.target.value)} placeholder="media" />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>子路径 (Subpath)</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} value={smbPath} onChange={e => setSmbPath(e.target.value)} placeholder="books (可选)" />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>用户名</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} value={smbUsername} onChange={e => setSmbUsername(e.target.value)} placeholder="guest (可选)" />
+          </div>
+          <div>
+            <label style={{ display: "block", fontSize: "12px", marginBottom: "4px", fontWeight: "bold" }}>密码</label>
+            <input style={{ width: "100%", padding: "8px", borderRadius: "6px", border: "1px solid var(--border-color, #e0e0e0)", background: "transparent", color: "inherit" }} type="password" value={smbPassword} onChange={e => setSmbPassword(e.target.value)} placeholder="•••••••• (可选)" />
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: "10px", marginBottom: "16px" }}>
+          <button className="primary-action" style={{ background: "rgba(0, 118, 255, 0.1)", color: "var(--accent-color, #0076ff)", border: "none" }} onClick={testSmb} disabled={isTesting}>
+            {isTesting ? "测试中..." : "测试连接"}
+          </button>
+          <button className="primary-action" onClick={addSmb}>
+            添加共享
+          </button>
+        </div>
+
+        {smbError && <p className="error-copy" style={{ color: "var(--error-color, #ff3b30)", margin: "8px 0" }}>{smbError}</p>}
+        {smbSuccess && <p className="success-copy" style={{ color: "var(--success-color, #34c759)", margin: "8px 0" }}>{smbSuccess}</p>}
+
+        <div className="root-list" style={{ marginTop: "16px" }}>
+          {smbRoots.map((root) => (
+            <div className="root-item" key={root.id}>
+              <div>
+                <span>smb://{root.host}/{root.shareName}/{root.path}</span>
+                <small>{root.lastScannedAt ? `上次扫描 ${root.lastScannedAt}` : "尚未扫描"}</small>
+              </div>
+              <button className="icon-button compact-icon" onClick={() => removeSmbRoot(root.id)} aria-label={`删除 ${root.host}`}>
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </section>
+
       <section className="settings-panel">
         <SectionTitle icon={<RefreshCw size={18} />} title="扫描" />
-        <p className="muted-copy">扫描会读取 EPUB 元数据、内置封面、音频标签和内嵌专辑图。</p>
+        <p className="muted-copy">扫描会同时读取本地和网络共享路径中的 EPUB 元数据、内置封面、音频标签和内嵌专辑图。</p>
         <button className="primary-action" onClick={runScan} disabled={isScanning}>
           {isScanning ? "扫描中" : "开始扫描"}
         </button>
@@ -1618,17 +2103,19 @@ function PdfCover({
 function BookCard({
   book,
   onOpen,
-  onCoverExtracted
+  onCoverExtracted,
+  onClearProgress
 }: {
   book: BookItem;
   onOpen: () => void;
   onCoverExtracted?: (bookId: string, coverPath: string) => void;
+  onClearProgress?: () => void;
 }) {
   const isPdf = book.format === "pdf";
   const hasCover = !!book.coverPath;
 
   return (
-    <button className="book-card" onClick={onOpen}>
+    <div className="book-card" onClick={onOpen}>
       <span className="book-cover" style={{ backgroundImage: hasCover ? coverBackground(book.coverPath) : undefined }}>
         <span className={`format-ribbon ${book.format}`}>{book.format.toUpperCase()}</span>
         {hasCover ? (
@@ -1638,13 +2125,27 @@ function BookCard({
         ) : (
           <span>{book.title}</span>
         )}
+        {onClearProgress && (book.progress > 0 || !!book.cfi || !!book.recentReadAt) && (
+          <button
+            className="book-delete-progress-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onClearProgress();
+            }}
+            title="从阅读记录中删除"
+            aria-label="从阅读记录中删除"
+          >
+            <X size={12} />
+          </button>
+        )}
       </span>
       <strong>{book.title}</strong>
       <small>{book.author ?? "未知作者"}</small>
       <span className="mini-progress">
         <i style={{ width: `${Math.round(book.progress)}%` }} />
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -1707,7 +2208,15 @@ function GlobalPlayer({
       </button>
       <div className="now-playing-art" style={{ backgroundImage: coverBackground(track?.coverPath ?? null) }} />
       <div className="now-playing-copy">
-        <strong>{track?.title ?? "还没有播放内容"}</strong>
+        <div className="now-playing-title-row">
+          <strong>{track?.title ?? "还没有播放内容"}</strong>
+          {track && (
+            <div className="player-sync-indicator" title="播放进度已与云端同步">
+              <span className="sync-dot" />
+              <span>已同步</span>
+            </div>
+          )}
+        </div>
         <span>{track ? [track.artist, track.album].filter(Boolean).join(" · ") || "当前书房播放" : "从音乐或播客里选择一项"}</span>
       </div>
       <div className="player-middle">
@@ -1851,6 +2360,19 @@ function resolveApiBase() {
   if (typeof window === "undefined") return "http://localhost:4141";
   const { protocol, hostname } = window.location;
   return `${protocol}//${hostname}:4141`;
+}
+
+function resolveWsBase() {
+  const apiBase = resolveApiBase();
+  const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  try {
+    const url = new URL(apiBase);
+    return `${wsProtocol}//${url.host}`;
+  } catch {
+    const host = window.location.host || "localhost:4141";
+    const wsHost = host.includes(":") ? host : `${host}:4141`;
+    return `${wsProtocol}//${wsHost}`;
+  }
 }
 
 function formatDuration(duration: number | null) {
@@ -2128,6 +2650,44 @@ function UserModal({
     </div>
   );
 }
+function SyncConfirmationModal({
+  onConfirm,
+  onDecline
+}: {
+  onConfirm: () => void;
+  onDecline: () => void;
+}) {
+  return (
+    <div className="user-modal-overlay" style={{ zIndex: 1000 }}>
+      <motion.div
+        className="user-modal-card"
+        initial={{ opacity: 0, scale: 0.95, y: 20 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.95, y: 20 }}
+        transition={{ duration: 0.24 }}
+        style={{ maxWidth: "400px", textAlign: "center", padding: "24px" }}
+      >
+        <div className="user-modal-header" style={{ justifyContent: "center", marginBottom: "16px", borderBottom: "none", paddingBottom: 0 }}>
+          <h2 style={{ fontSize: "20px", fontWeight: "bold" }}>同步播放提示</h2>
+        </div>
+        <div className="user-modal-body" style={{ display: "flex", flexDirection: "column", gap: "20px", padding: 0 }}>
+          <p style={{ fontSize: "15px", lineHeight: "1.6", color: "var(--text-color)" }}>
+            检测到其他终端正在播放，是否加入同步播放？
+          </p>
+          <div style={{ display: "flex", gap: "12px", justifyContent: "center", marginTop: "8px" }}>
+            <button className="ghost-action" onClick={onDecline} style={{ flex: 1, padding: "10px" }}>
+              独立播放
+            </button>
+            <button className="primary-action" onClick={onConfirm} style={{ flex: 1, padding: "10px" }}>
+              加入同步
+            </button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

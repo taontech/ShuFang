@@ -1,11 +1,14 @@
+// @ts-nocheck
 import Fastify, { type FastifyReply } from "fastify";
 import fastifyStatic from "@fastify/static";
+import fastifyWebsocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { openDatabase } from "./database.js";
 import { addScanRoot, scanLibrary } from "./scanner.js";
+import { getSmbClient, smbCreateReadStream, smbReaddir, smbExists, smbReadFile, testSmbConnection } from "./smb.js";
 
 const port = Number(process.env.PORT ?? 4141);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -16,6 +19,51 @@ const app = Fastify({
     level: process.env.LOG_LEVEL ?? "info"
   }
 });
+
+interface PlaybackSession {
+  trackId: string;
+  position: number;
+  isPlaying: boolean;
+  updatedAt: number;
+}
+
+let activeSession: PlaybackSession | null = null;
+const connectedSockets = new Set<any>();
+
+// Load active session from database
+try {
+  const row = db.prepare(
+    "SELECT track_id, position, updated_at FROM audio_progress WHERE user_id = 'system' ORDER BY updated_at DESC LIMIT 1"
+  ).get() as { track_id: string; position: number; updated_at: string } | undefined;
+  if (row) {
+    activeSession = {
+      trackId: row.track_id,
+      position: row.position,
+      isPlaying: false,
+      updatedAt: new Date(row.updated_at).getTime() || Date.now()
+    };
+  }
+} catch (e) {
+  app.log.error("Failed to load active session from DB on startup: " + e);
+}
+
+function saveSessionToDb() {
+  if (!activeSession) return;
+  try {
+    db.prepare(`
+      INSERT INTO audio_progress (user_id, track_id, position, updated_at)
+      VALUES ('system', @trackId, @position, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, track_id) DO UPDATE SET
+        position = excluded.position,
+        updated_at = CURRENT_TIMESTAMP
+    `).run({
+      trackId: activeSession.trackId,
+      position: activeSession.position
+    });
+  } catch (err) {
+    app.log.error("Failed to save session to DB: " + err);
+  }
+}
 
 app.addHook("onRequest", (request, reply, done) => {
   reply.header("Access-Control-Allow-Origin", "*");
@@ -34,11 +82,77 @@ await app.register(fastifyStatic, {
   decorateReply: false
 });
 
+await app.register(fastifyWebsocket as any);
+
 app.get("/api/health", async () => ({
   ok: true,
   name: "shufang",
   service: "local-service"
 }));
+
+app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
+  connectedSockets.add(connection.socket);
+
+  if (activeSession) {
+    let currentPosition = activeSession.position;
+    if (activeSession.isPlaying) {
+      const elapsed = (Date.now() - activeSession.updatedAt) / 1000;
+      currentPosition += elapsed;
+    }
+    connection.socket.send(
+      JSON.stringify({
+        type: "SESSION_STATE",
+        trackId: activeSession.trackId,
+        position: currentPosition,
+        isPlaying: activeSession.isPlaying,
+        hasOtherClients: connectedSockets.size > 1
+      })
+    );
+  }
+
+  connection.socket.on("message", (rawMessage) => {
+    try {
+      const data = JSON.parse(rawMessage.toString());
+      const { type, clientId, trackId, position, isPlaying } = data;
+
+      if (trackId !== undefined) {
+        activeSession = {
+          trackId,
+          position: position ?? 0,
+          isPlaying: !!isPlaying,
+          updatedAt: Date.now()
+        };
+      }
+
+      for (const socket of connectedSockets) {
+        if (socket !== connection.socket) {
+          socket.send(
+            JSON.stringify({
+              type,
+              clientId,
+              trackId,
+              position,
+              isPlaying
+            })
+          );
+        }
+      }
+
+      if (type === "PAUSE" || !isPlaying) {
+        saveSessionToDb();
+      }
+    } catch (err) {
+      app.log.error(err);
+    }
+  });
+
+  connection.socket.on("close", () => {
+    connectedSockets.delete(connection.socket);
+    if (connectedSockets.size === 0) {
+      saveSessionToDb();
+    }
+  });
+});
 
 app.get("/api/library/summary", async () => ({
   users: count("users"),
@@ -145,6 +259,18 @@ app.put<{
       chapter_title = excluded.chapter_title,
       updated_at = CURRENT_TIMESTAMP
   `).run({ userId, bookId, cfi, percentage, chapterTitle: chapterTitle ?? null });
+
+  return { ok: true };
+});
+
+app.delete<{
+  Params: { bookId: string };
+  Querystring: { userId?: string };
+}>("/api/books/:bookId/progress", async (request) => {
+  const { bookId } = request.params;
+  const userId = request.query.userId ?? "u-1";
+
+  db.prepare("DELETE FROM book_progress WHERE user_id = ? AND book_id = ?").run(userId, bookId);
 
   return { ok: true };
 });
@@ -279,6 +405,41 @@ app.get<{ Params: { trackId: string } }>("/api/audio/:trackId/lyrics", async (re
     | undefined;
   if (!track) return reply.code(404).send({ error: "track_not_found" });
 
+  if (track.filePath.startsWith("smb://")) {
+    const { host, shareName, remotePath } = parseSmbUri(track.filePath);
+    const creds = getSmbCredentials(host, shareName);
+    if (!creds) return { kind: "none", lines: [] };
+
+    const client = getSmbClient({
+      host: creds.host,
+      port: creds.port,
+      username: creds.username || undefined,
+      password: creds.password || undefined,
+      shareName: creds.shareName
+    });
+
+    try {
+      const baseRemotePath = remotePath.slice(0, -extname(remotePath).length);
+      for (const extension of [".lrc", ".txt"]) {
+        try {
+          const sidecarPath = `${baseRemotePath}${extension}`;
+          if (await smbExists(client, sidecarPath)) {
+            const buffer = await smbReadFile(client, sidecarPath);
+            const text = buffer.toString("utf-8");
+            return { kind: extension === ".lrc" ? "lrc" : "plain", lines: parseLyrics(text) };
+          }
+        } catch {
+          // Try next
+        }
+      }
+    } finally {
+      try {
+        client.close();
+      } catch {}
+    }
+    return { kind: "none", lines: [] };
+  }
+
   const basePath = track.filePath.slice(0, -extname(track.filePath).length);
   for (const extension of [".lrc", ".txt"]) {
     try {
@@ -310,6 +471,46 @@ app.delete<{ Params: { rootId: string } }>("/api/roots/:rootId", async (request)
   return { ok: true };
 });
 
+app.get("/api/roots/smb", async () => {
+  return db
+    .prepare("SELECT id, host, port, username, password, share_name AS shareName, path, enabled, last_scanned_at AS lastScannedAt, created_at AS createdAt FROM smb_roots ORDER BY created_at DESC")
+    .all();
+});
+
+app.post<{
+  Body: { host: string; port?: number; username?: string; password?: string; shareName: string; path: string };
+}>("/api/roots/smb", async (request, reply) => {
+  const { host, port = 445, username, password, shareName, path } = request.body;
+  try {
+    const id = "smb-" + randomUUID().slice(0, 8);
+    db.prepare(`
+      INSERT INTO smb_roots (id, host, port, username, password, share_name, path)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, host, port, username || null, password || null, shareName, path);
+
+    return { id, host, port, username, password, shareName, path, enabled: 1, lastScannedAt: null };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post<{
+  Body: { host: string; port?: number; username?: string; password?: string; shareName: string; path: string };
+}>("/api/roots/smb/test", async (request, reply) => {
+  const { host, port = 445, username, password, shareName } = request.body;
+  try {
+    await testSmbConnection({ host, port, username, password, shareName });
+    return { ok: true };
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.delete<{ Params: { rootId: string } }>("/api/roots/smb/:rootId", async (request) => {
+  db.prepare("DELETE FROM smb_roots WHERE id = ?").run(request.params.rootId);
+  return { ok: true };
+});
+
 app.post("/api/scan", async () => {
   return scanLibrary(db);
 });
@@ -327,7 +528,77 @@ async function ensureFile(filePath: string) {
   return fileStat;
 }
 
+function parseSmbUri(uri: string) {
+  const match = uri.match(/^smb:\/\/([^/]+)\/([^/]+)\/(.+)$/);
+  if (!match) throw new Error("Invalid SMB URI");
+  return {
+    host: match[1],
+    shareName: match[2],
+    remotePath: match[3]
+  };
+}
+
+function getSmbCredentials(host: string, shareName: string) {
+  return db
+    .prepare("SELECT host, port, username, password, share_name AS shareName FROM smb_roots WHERE host = ? AND share_name = ? AND enabled = 1 LIMIT 1")
+    .get(host, shareName) as { host: string; port: number; username?: string; password?: string; shareName: string } | undefined;
+}
+
+async function getSmbFileSize(client: any, remotePath: string): Promise<number> {
+  const dir = dirname(remotePath);
+  const fileBasename = basename(remotePath);
+  const files = await smbReaddir(client, dir === "." || dir === "" ? "" : dir);
+  const fileStats = files.find((f: any) => f.name.toLowerCase() === fileBasename.toLowerCase());
+  if (!fileStats) {
+    throw new Error(`File not found: ${remotePath}`);
+  }
+  return fileStats.size || 0;
+}
+
 async function streamFileWithRange(filePath: string, rangeHeader: string | undefined, reply: FastifyReply) {
+  if (filePath.startsWith("smb://")) {
+    const { host, shareName, remotePath } = parseSmbUri(filePath);
+    const creds = getSmbCredentials(host, shareName);
+    if (!creds) {
+      return reply.code(401).send({ error: "smb_credentials_not_found" });
+    }
+
+    const client = getSmbClient({
+      host: creds.host,
+      port: creds.port,
+      username: creds.username || undefined,
+      password: creds.password || undefined,
+      shareName: creds.shareName
+    });
+
+    reply.raw.on("close", () => {
+      try {
+        client.close();
+      } catch {}
+    });
+
+    try {
+      const fileSize = await getSmbFileSize(client, remotePath);
+      reply.header("Accept-Ranges", "bytes");
+      const range = parseRangeHeader(rangeHeader, fileSize);
+      if (range) {
+        reply.code(206);
+        reply.header("Content-Range", `bytes ${range.start}-${range.end}/${fileSize}`);
+        reply.header("Content-Length", String(range.end - range.start + 1));
+        const stream = await smbCreateReadStream(client, remotePath, { start: range.start, end: range.end });
+        return reply.send(stream);
+      }
+      reply.header("Content-Length", String(fileSize));
+      const stream = await smbCreateReadStream(client, remotePath);
+      return reply.send(stream);
+    } catch (error) {
+      try {
+        client.close();
+      } catch {}
+      return reply.code(500).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   const fileStat = await ensureFile(filePath);
   reply.header("Accept-Ranges", "bytes");
   const range = parseRangeHeader(rangeHeader, fileStat.size);

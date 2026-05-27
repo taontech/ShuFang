@@ -103,6 +103,19 @@ function migrate(db: Database.Database) {
       last_scanned_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS smb_roots (
+      id TEXT PRIMARY KEY,
+      host TEXT NOT NULL,
+      port INTEGER NOT NULL DEFAULT 445,
+      username TEXT,
+      password TEXT,
+      share_name TEXT NOT NULL,
+      path TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_scanned_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   addColumn(db, "books", "description", "TEXT");
@@ -119,6 +132,7 @@ function seed(db: Database.Database) {
 
   insertUser.run({ id: "u-1", name: "陶宁", avatar: "T", role: "admin" });
   insertUser.run({ id: "u-2", name: "家人", avatar: "J", role: "member" });
+  insertUser.run({ id: "system", name: "System", avatar: "S", role: "admin" });
 }
 
 function addColumn(db: Database.Database, table: string, column: string, definition: string) {
