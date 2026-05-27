@@ -25,6 +25,7 @@ interface PlaybackSession {
   isPlaying: boolean;
   playMode: string;
   updatedAt: number;
+  track?: any;
 }
 
 let activeSession: PlaybackSession | null = null;
@@ -107,7 +108,8 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
         position: currentPosition,
         isPlaying: activeSession.isPlaying,
         playMode: activeSession.playMode || "repeat-all",
-        hasOtherClients: connectedSockets.size > 1
+        hasOtherClients: connectedSockets.size > 1,
+        track: activeSession.track
       })
     );
   }
@@ -123,7 +125,8 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
           position: position ?? 0,
           isPlaying: !!isPlaying,
           playMode: playMode ?? activeSession?.playMode ?? "repeat-all",
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          track: data.track
         };
       } else if (playMode !== undefined && activeSession) {
         activeSession.playMode = playMode;
@@ -132,16 +135,7 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
 
       for (const socket of connectedSockets) {
         if (socket !== connection.socket) {
-          socket.send(
-            JSON.stringify({
-              type,
-              clientId,
-              trackId,
-              position,
-              isPlaying,
-              playMode
-            })
-          );
+          socket.send(rawMessage.toString());
         }
       }
 
@@ -422,6 +416,75 @@ app.get<{ Params: { trackId: string } }>("/api/audio/:trackId/lyrics", async (re
     }
   }
   return { kind: "none", lines: [] };
+});
+
+app.get<{ Querystring: { userId: string; kind?: "music" | "podcast" } }>("/api/audio/recent", async (request) => {
+  const userId = request.query.userId;
+  const kind = request.query.kind ?? "music";
+  if (!userId) return [];
+  return db
+    .prepare(
+      `
+      SELECT t.id, t.title, t.artist, t.album, t.duration, t.cover_path AS coverPath, t.kind, ap.position
+      FROM audio_tracks t
+      JOIN audio_progress ap ON ap.track_id = t.id AND ap.user_id = ?
+      WHERE t.kind = ?
+      ORDER BY ap.updated_at DESC
+      LIMIT 20
+    `
+    )
+    .all(userId, kind);
+});
+
+app.put<{
+  Params: { trackId: string };
+  Body: { 
+    userId: string; 
+    position: number; 
+    track?: {
+      title: string;
+      artist?: string;
+      album?: string;
+      duration?: number;
+      coverPath?: string;
+      kind?: string;
+      filePath?: string;
+    }
+  };
+}>("/api/audio/:trackId/progress", async (request) => {
+  const { trackId } = request.params;
+  const { userId, position, track } = request.body;
+
+  db.transaction(() => {
+    if (track) {
+      const existing = db.prepare("SELECT id FROM audio_tracks WHERE id = ? OR file_path = ?").get(trackId, track.filePath ?? trackId);
+      if (!existing) {
+        db.prepare(`
+          INSERT INTO audio_tracks (id, file_path, title, artist, album, duration, cover_path, kind)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          trackId,
+          track.filePath ?? trackId,
+          track.title,
+          track.artist ?? null,
+          track.album ?? null,
+          track.duration ?? null,
+          track.coverPath ?? null,
+          track.kind ?? "podcast"
+        );
+      }
+    }
+
+    db.prepare(`
+      INSERT INTO audio_progress (user_id, track_id, position, updated_at)
+      VALUES (@userId, @trackId, @position, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, track_id) DO UPDATE SET
+        position = excluded.position,
+        updated_at = CURRENT_TIMESTAMP
+    `).run({ userId, trackId, position });
+  })();
+
+  return { ok: true };
 });
 
 app.get("/api/roots", async () => {

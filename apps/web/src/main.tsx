@@ -35,7 +35,8 @@ import {
   Plus,
   X,
   Menu,
-  Network
+  Network,
+  Radio
 } from "lucide-react";
 
 import { AnimatePresence, motion } from "framer-motion";
@@ -79,6 +80,7 @@ type AudioTrack = {
   duration: number | null;
   coverPath: string | null;
   kind: "music" | "podcast";
+  filePath?: string | null;
 };
 
 type ScanRoot = {
@@ -116,6 +118,7 @@ function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [books, setBooks] = useState<BookItem[]>([]);
   const [music, setMusic] = useState<AudioTrack[]>([]);
+  const [recentMusic, setRecentMusic] = useState<AudioTrack[]>([]);
   const [podcasts, setPodcasts] = useState<AudioTrack[]>([]);
   const queue = useMemo(() => [...music, ...podcasts], [music, podcasts]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
@@ -143,7 +146,7 @@ function App() {
 
   const [isSyncEnabled, setIsSyncEnabled] = useState(true);
   const [showSyncDialog, setShowSyncDialog] = useState(false);
-  const [pendingSession, setPendingSession] = useState<{ trackId: string; position: number; isPlaying: boolean; playMode?: PlayMode } | null>(null);
+  const [pendingSession, setPendingSession] = useState<{ trackId: string; position: number; isPlaying: boolean; playMode?: PlayMode; track?: AudioTrack } | null>(null);
 
   const clientId = useMemo(() => {
     let id = localStorage.getItem("shufang.clientId");
@@ -159,10 +162,21 @@ function App() {
   const lastSentPositionRef = useRef(0);
   const lastSentTimeRef = useRef(0);
 
-  const sendWsMessage = (type: string, payload: { trackId?: string; position?: number; isPlaying?: boolean; playMode?: PlayMode }) => {
+  const sendWsMessage = (
+    type: string,
+    payload: {
+      trackId?: string;
+      position?: number;
+      isPlaying?: boolean;
+      playMode?: PlayMode;
+      track?: AudioTrack;
+    }
+  ) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     if (!isSyncEnabled) return;
     if (isApplyingWsUpdateRef.current) return;
+
+    const activeTrack = payload.track ?? (payload.trackId ? undefined : currentTrack);
 
     wsRef.current.send(
       JSON.stringify({
@@ -171,7 +185,17 @@ function App() {
         trackId: payload.trackId ?? currentTrack?.id,
         position: payload.position ?? audioPosition,
         isPlaying: payload.isPlaying ?? isPlaying,
-        playMode: payload.playMode
+        playMode: payload.playMode,
+        track: activeTrack ? {
+          id: activeTrack.id,
+          title: activeTrack.title,
+          artist: activeTrack.artist,
+          album: activeTrack.album,
+          duration: activeTrack.duration,
+          coverPath: activeTrack.coverPath,
+          kind: activeTrack.kind,
+          filePath: activeTrack.filePath
+        } : undefined
       })
     );
   };
@@ -202,9 +226,9 @@ function App() {
 
           if (type === "SESSION_STATE") {
             if (message.hasOtherClients) {
-              setPendingSession({ trackId, position, isPlaying: msgIsPlaying, playMode: msgPlayMode });
+              setPendingSession({ trackId, position, isPlaying: msgIsPlaying, playMode: msgPlayMode, track: message.track });
             } else {
-              const track = queue.find((t) => t.id === trackId);
+              const track = queue.find((t) => t.id === trackId) || message.track;
               if (track) {
                 isApplyingWsUpdateRef.current = true;
                 setCurrentTrack(track);
@@ -228,7 +252,7 @@ function App() {
                 setPlayMode(msgPlayMode);
               }
             } else if (type === "TRACK_CHANGE") {
-              const track = queue.find((t) => t.id === trackId);
+              const track = queue.find((t) => t.id === trackId) || message.track;
               if (track) {
                 setCurrentTrack(track);
                 setIsPlaying(msgIsPlaying);
@@ -291,7 +315,7 @@ function App() {
 
   useEffect(() => {
     if (pendingSession && !showSyncDialog) {
-      const track = queue.find((t) => t.id === pendingSession.trackId);
+      const track = queue.find((t) => t.id === pendingSession.trackId) || pendingSession.track;
       if (track) {
         setShowSyncDialog(true);
       }
@@ -300,7 +324,7 @@ function App() {
 
   const joinSync = () => {
     if (pendingSession) {
-      const track = queue.find((t) => t.id === pendingSession.trackId);
+      const track = queue.find((t) => t.id === pendingSession.trackId) || pendingSession.track;
       if (track) {
         isApplyingWsUpdateRef.current = true;
         setCurrentTrack(track);
@@ -388,18 +412,20 @@ function App() {
   }, [lyrics, audioPosition]);
 
   const refreshAll = async (userId = activeUserId) => {
-    const [nextUsers, nextBooks, nextMusic, nextPodcasts, nextRoots] = await Promise.all([
+    const [nextUsers, nextBooks, nextMusic, nextPodcasts, nextRoots, nextRecentMusic] = await Promise.all([
       api<User[]>("/api/users"),
       api<BookItem[]>(`/api/books?userId=${encodeURIComponent(userId)}`),
       api<AudioTrack[]>("/api/audio?kind=music"),
       api<AudioTrack[]>("/api/audio?kind=podcast"),
-      api<ScanRoot[]>("/api/roots")
+      api<ScanRoot[]>("/api/roots"),
+      api<AudioTrack[]>(`/api/audio/recent?userId=${encodeURIComponent(userId)}&kind=music`).catch(() => [])
     ]);
     setUsers(nextUsers);
     setBooks(nextBooks);
     setMusic(nextMusic);
     setPodcasts(nextPodcasts);
     setRoots(nextRoots);
+    setRecentMusic(nextRecentMusic);
     await refreshReadingActivity(userId);
   };
 
@@ -481,11 +507,41 @@ function App() {
     });
   };
 
+  const saveAudioProgress = async (track: AudioTrack, position: number) => {
+    try {
+      await api(`/api/audio/${track.id}/progress`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: activeUserId,
+          position,
+          track: track.kind === "podcast" ? {
+            title: track.title,
+            artist: track.artist,
+            album: track.album,
+            duration: track.duration,
+            coverPath: track.coverPath,
+            kind: track.kind,
+            filePath: track.filePath
+          } : undefined
+        })
+      });
+      if (position === 0) {
+        const nextRecent = await api<AudioTrack[]>(`/api/audio/recent?userId=${encodeURIComponent(activeUserId)}&kind=music`);
+        setRecentMusic(nextRecent);
+      }
+    } catch (err) {
+      console.error("Failed to save audio progress:", err);
+    }
+  };
+
   const playTrack = (track: AudioTrack) => {
     setCurrentTrack(track);
     setIsPlaying(true);
-    sendWsMessage("TRACK_CHANGE", { trackId: track.id, position: 0, isPlaying: true });
+    sendWsMessage("TRACK_CHANGE", { trackId: track.id, position: 0, isPlaying: true, track });
+    void saveAudioProgress(track, 0);
   };
+
 
 
   const playNextTrack = () => {
@@ -586,6 +642,7 @@ function App() {
           <NavButton icon={<Home size={19} />} active={view === "home"} onClick={() => navigateTo("home")} label="首页" />
           <NavButton icon={<Library size={19} />} active={view === "books"} onClick={() => navigateTo("books")} label="书架" />
           <NavButton icon={<Music2 size={19} />} active={view === "music"} onClick={() => navigateTo("music")} label="音乐" />
+          <NavButton icon={<Radio size={19} />} active={view === "podcasts"} onClick={() => navigateTo("podcasts")} label="播客" />
           <NavButton icon={<Settings size={19} />} active={view === "settings"} onClick={() => navigateTo("settings")} label="资源" />
         </nav>
 
@@ -613,7 +670,7 @@ function App() {
             {view === "home" && (
               <HomeView
                 books={books}
-                tracks={music}
+                tracks={recentMusic.length > 0 ? recentMusic : music}
                 openBook={openBook}
                 playTrack={playTrack}
                 readingActivity={readingActivity}
@@ -651,6 +708,15 @@ function App() {
                 }}
               />
             )}
+            {view === "podcasts" && (
+              <PodcastsView
+                books={books}
+                playTrack={playTrack}
+                currentTrack={currentTrack}
+                isPlaying={isPlaying}
+                setIsPlaying={setIsPlaying}
+              />
+            )}
             {view === "settings" && (
               <SettingsView
                 roots={roots}
@@ -666,7 +732,13 @@ function App() {
 
       <audio
         ref={audioRef}
-        src={currentTrack ? `${API_BASE}/api/audio/${currentTrack.id}/stream` : undefined}
+        src={
+          currentTrack 
+            ? currentTrack.filePath?.startsWith("http") 
+              ? currentTrack.filePath 
+              : `${API_BASE}/api/audio/${currentTrack.id}/stream` 
+            : undefined
+        }
         loop={playMode === "repeat-one"}
         preload="metadata"
         onPlay={() => {
@@ -690,6 +762,9 @@ function App() {
               sendWsMessage("PLAY", { position: currentTime, isPlaying: true });
               lastSentPositionRef.current = currentTime;
               lastSentTimeRef.current = now;
+              if (currentTrack) {
+                void saveAudioProgress(currentTrack, currentTime);
+              }
             }
           }
         }}
@@ -860,7 +935,7 @@ function HomeView({
       <section className="audio-panel">
         <SectionTitle icon={<ListMusic size={18} />} title="正在收听" actionLabel="更多" onAction={goMusic} />
         <TrackList 
-          tracks={tracks.slice(0, 10)} 
+          tracks={tracks.slice(0, 20)} 
           playTrack={playTrack} 
           currentTrackId={currentTrack?.id}
           isPlaying={isPlaying}
@@ -1689,6 +1764,304 @@ function PdfPageCanvas({
   );
 }
 
+function PodcastsView({
+  books,
+  playTrack,
+  currentTrack,
+  isPlaying,
+  setIsPlaying
+}: {
+  books: BookItem[];
+  playTrack: (track: AudioTrack) => void;
+  currentTrack: AudioTrack | null;
+  isPlaying: boolean;
+  setIsPlaying: (value: boolean) => void;
+}) {
+  const readingBooks = useMemo(() => {
+    return books.filter((b) => b.progress > 0 && b.progress < 100);
+  }, [books]);
+
+  const recommendedByBooks = useMemo(() => {
+    const list = readingBooks.length > 0 ? readingBooks : books;
+    return list.slice(0, 3);
+  }, [readingBooks, books]);
+
+  const keywords = useMemo(() => {
+    return recommendedByBooks
+      .map((b) => b.title.replace(/[:：(（].*$/, "").trim())
+      .filter(Boolean);
+  }, [recommendedByBooks]);
+
+  const [podcasts, setPodcasts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedPodcast, setSelectedPodcast] = useState<any | null>(null);
+  const [episodes, setEpisodes] = useState<any[]>([]);
+  const [episodesLoading, setEpisodesLoading] = useState(false);
+  const [expandedEpisodeIndex, setExpandedEpisodeIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadData = async () => {
+      setLoading(true);
+      setError("");
+      try {
+        if (keywords.length === 0) {
+          const popular = await fetchPopular();
+          if (active) setPodcasts(popular);
+          return;
+        }
+
+        const results = await Promise.all(
+          keywords.map((kw) =>
+            fetch(
+              `https://itunes.apple.com/search?term=${encodeURIComponent(kw)}&media=podcast&limit=12&country=cn`
+            )
+              .then((res) => res.json())
+              .then((data) => data.results || [])
+              .catch(() => [])
+          )
+        );
+
+        if (!active) return;
+
+        const flat = results.flat();
+        const seen = new Set();
+        const unique = flat.filter((item) => {
+          if (seen.has(item.collectionId)) return false;
+          seen.add(item.collectionId);
+          return true;
+        });
+
+        if (unique.length === 0) {
+          const popular = await fetchPopular();
+          if (active) setPodcasts(popular);
+        } else {
+          if (active) setPodcasts(unique);
+        }
+      } catch (err) {
+        console.error(err);
+        const popular = await fetchPopular();
+        if (active) setPodcasts(popular);
+      } finally {
+        if (active) setLoading(false);
+      }
+    };
+
+    const fetchPopular = async () => {
+      try {
+        const res = await fetch("https://itunes.apple.com/cn/rss/toppodcasts/limit=30/json");
+        const data = await res.json();
+        const entries = data.feed?.entry || [];
+        return entries.map((entry: any) => ({
+          collectionId: entry.id.attributes["im:id"],
+          collectionName: entry["im:name"].label,
+          artistName: entry["im:artist"].label,
+          artworkUrl100: entry["im:image"][2].label,
+          artworkUrl600: entry["im:image"][2].label,
+          primaryGenreName: entry.category.attributes.label,
+          isPopular: true
+        }));
+      } catch (err) {
+        console.error("Fetch popular failed", err);
+        return [];
+      }
+    };
+
+    void loadData();
+    return () => {
+      active = false;
+    };
+  }, [keywords]);
+
+  useEffect(() => {
+    if (!selectedPodcast) {
+      setEpisodes([]);
+      setExpandedEpisodeIndex(null);
+      return;
+    }
+    let active = true;
+    const loadEpisodes = async () => {
+      setEpisodesLoading(true);
+      try {
+        const res = await fetch(
+          `https://itunes.apple.com/lookup?id=${selectedPodcast.collectionId}&entity=podcastEpisode&limit=15`
+        );
+        const data = await res.json();
+        const results = data.results || [];
+        if (results.length > 1) {
+          if (active) setEpisodes(results.slice(1));
+        } else {
+          if (active) setEpisodes([]);
+        }
+      } catch (err) {
+        console.error("Load episodes failed", err);
+      } finally {
+        if (active) setEpisodesLoading(false);
+      }
+    };
+    void loadEpisodes();
+    return () => {
+      active = false;
+    };
+  }, [selectedPodcast]);
+
+  return (
+    <div className="podcasts-layout">
+      <section className="podcast-hero">
+        <div className="podcast-hero-content">
+          <span className="podcast-badge">
+            <Sparkles size={13} />
+            AI 智能推荐
+          </span>
+          <h1>播客书窗</h1>
+          <p className="podcast-desc">将好书的声音带进耳朵。根据您的书架内容智能定制推荐。</p>
+          
+          <div className="podcast-sources">
+            <span className="source-label">推荐源自您正在看的书：</span>
+            <div className="source-chips">
+              {recommendedByBooks.length > 0 ? (
+                recommendedByBooks.map((b) => (
+                  <span className="source-chip" key={b.id}>
+                    📖 {b.title}
+                  </span>
+                ))
+              ) : (
+                <span className="source-chip popular">🔥 当前最热门播客</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {loading ? (
+        <div className="podcast-loading">
+          <RefreshCw size={24} className="spin" />
+          <span>正在搜寻与书籍相关的电台...</span>
+        </div>
+      ) : (
+        <div className="podcast-grid">
+          {podcasts.map((p) => (
+            <div className="podcast-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
+              <div 
+                className="podcast-card-cover"
+                style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
+              />
+              <div className="podcast-card-body">
+                <span className="podcast-card-genre">{p.primaryGenreName || "播客"}</span>
+                <h3 className="podcast-card-title">{p.collectionName}</h3>
+                <p className="podcast-card-artist">{p.artistName}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <AnimatePresence>
+        {selectedPodcast && (
+          <div className="podcast-drawer-backdrop" onClick={() => setSelectedPodcast(null)}>
+            <motion.div 
+              className="podcast-drawer"
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ type: "spring", damping: 25, stiffness: 220 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="podcast-drawer-header">
+                <button className="icon-button close-drawer-btn" onClick={() => setSelectedPodcast(null)}>
+                  <X size={18} />
+                </button>
+                <div className="podcast-drawer-meta">
+                  <div 
+                    className="podcast-drawer-art"
+                    style={{ backgroundImage: coverBackground(selectedPodcast.artworkUrl600 || selectedPodcast.artworkUrl100) }}
+                  />
+                  <div>
+                    <h2>{selectedPodcast.collectionName}</h2>
+                    <p>{selectedPodcast.artistName}</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="podcast-drawer-body">
+                <h3>近期单集</h3>
+                {episodesLoading ? (
+                  <div className="episodes-loading">
+                    <RefreshCw size={20} className="spin" />
+                    <span>加载单集中...</span>
+                  </div>
+                ) : episodes.length > 0 ? (
+                  <div className="episodes-list">
+                    {episodes.map((ep, idx) => {
+                      const isCurrentEp = currentTrack?.filePath === ep.episodeUrl;
+                      const isExpanded = expandedEpisodeIndex === idx;
+                      
+                      return (
+                        <div 
+                          className={`episode-item ${isCurrentEp ? "active" : ""}`} 
+                          key={ep.trackId || idx}
+                        >
+                          <div className="episode-item-header" onClick={() => setExpandedEpisodeIndex(isExpanded ? null : idx)}>
+                            <div className="episode-title-block">
+                              <h4>{ep.trackName}</h4>
+                              <div className="episode-meta-row">
+                                <span>🗓️ {ep.releaseDate ? new Date(ep.releaseDate).toLocaleDateString() : "未知"}</span>
+                                <span>
+                                  ⏱️ {ep.trackTimeMillis ? Math.round(ep.trackTimeMillis / 60000) : 0} 分钟
+                                </span>
+                              </div>
+                            </div>
+                            <button 
+                              className={`play-episode-btn ${isCurrentEp && isPlaying ? "playing" : ""}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isCurrentEp) {
+                                  setIsPlaying(!isPlaying);
+                                } else {
+                                  const track: AudioTrack = {
+                                    id: `podcast-ep-${ep.trackId || ep.collectionId}-${Date.now()}`,
+                                    title: ep.trackName,
+                                    artist: selectedPodcast.artistName,
+                                    album: selectedPodcast.collectionName,
+                                    duration: ep.trackTimeMillis ? ep.trackTimeMillis / 1000 : 0,
+                                    coverPath: ep.artworkUrl600 || selectedPodcast.artworkUrl600 || selectedPodcast.artworkUrl100,
+                                    kind: "podcast",
+                                    filePath: ep.episodeUrl
+                                  };
+                                  playTrack(track);
+                                }
+                              }}
+                            >
+                              {isCurrentEp && isPlaying ? (
+                                <Pause size={14} fill="currentColor" />
+                              ) : (
+                                <Play size={14} fill="currentColor" />
+                              )}
+                            </button>
+                          </div>
+                          
+                          {isExpanded && (
+                            <div className="episode-description">
+                              <p>{ep.description || "暂无单集介绍"}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="episodes-empty">暂无可用播放单集</div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
 function AudioView({
   kind,
   tracks,
@@ -2142,12 +2515,9 @@ function GlobalPlayer({
 
   return (
     <footer className={`global-player ${hasLyrics ? "with-lyrics" : "no-lyrics"}`}>
-      <button className="play-button" onClick={() => setIsPlaying(!isPlaying)} disabled={!track} aria-label={isPlaying ? "暂停" : "播放"}>
-        {isPlaying ? <Pause size={20} /> : <Play size={20} />}
-      </button>
-      
       <div 
         className="now-playing-art" 
+        onClick={() => track && setIsPlaying(!isPlaying)}
         style={{ 
           backgroundImage: hasCover ? coverBackground(track.coverPath) : "linear-gradient(135deg, var(--accent), var(--green))",
           display: "flex",
@@ -2156,9 +2526,18 @@ function GlobalPlayer({
           color: "#fff",
           fontSize: "18px",
           fontWeight: "bold",
-          userSelect: "none"
+          userSelect: "none",
+          position: "relative",
+          cursor: track ? "pointer" : "default"
         }}
       >
+        {track && (
+          <div className="now-playing-art-overlay">
+            <span className="art-play-icon-wrapper">
+              {isPlaying ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+            </span>
+          </div>
+        )}
         {!hasCover && track?.title && (
           <span className="cover-fallback-char">
             {track.title.charAt(0).toUpperCase()}
@@ -2175,9 +2554,9 @@ function GlobalPlayer({
 
         <div className="player-metadata-row" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "1px", gap: "12px" }}>
           {track ? (
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0, flex: 1 }}>
               <strong style={{ fontSize: "14px", fontWeight: "700", color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{track.title}</strong>
-              <span style={{ fontSize: "12px", color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <span className="player-metadata-artist" style={{ fontSize: "12px", color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                 { [track.artist, track.album].filter(Boolean).join(" · ") }
               </span>
             </div>
@@ -2203,7 +2582,8 @@ function GlobalPlayer({
                 fontSize: "10px",
                 fontWeight: "700",
                 cursor: "pointer",
-                transition: "all 0.2s ease"
+                transition: "all 0.2s ease",
+                flexShrink: 0
               }}
             >
               <span className={`sync-dot ${isSyncEnabled ? "" : "dot-red"}`} style={{
@@ -2220,7 +2600,6 @@ function GlobalPlayer({
         </div>
 
         <div className="player-seek-row">
-          <span>{formatDuration(position)}</span>
           <input
             className="player-seek"
             type="range"
@@ -2231,7 +2610,10 @@ function GlobalPlayer({
             disabled={!track || !playableDuration}
             onChange={(event) => seek(Number(event.currentTarget.value))}
           />
-          <span>{formatDuration(playableDuration)}</span>
+          <div className="player-time-row">
+            <span>{formatDuration(position)}</span>
+            <span>{formatDuration(playableDuration)}</span>
+          </div>
         </div>
       </div>
 
