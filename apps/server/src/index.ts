@@ -8,7 +8,6 @@ import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { openDatabase } from "./database.js";
 import { addScanRoot, scanLibrary } from "./scanner.js";
-import { getSmbClient, smbCreateReadStream, smbReaddir, smbExists, smbReadFile, testSmbConnection } from "./smb.js";
 
 const port = Number(process.env.PORT ?? 4141);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -24,6 +23,7 @@ interface PlaybackSession {
   trackId: string;
   position: number;
   isPlaying: boolean;
+  playMode: string;
   updatedAt: number;
 }
 
@@ -40,6 +40,7 @@ try {
       trackId: row.track_id,
       position: row.position,
       isPlaying: false,
+      playMode: "repeat-all",
       updatedAt: new Date(row.updated_at).getTime() || Date.now()
     };
   }
@@ -105,6 +106,7 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
         trackId: activeSession.trackId,
         position: currentPosition,
         isPlaying: activeSession.isPlaying,
+        playMode: activeSession.playMode || "repeat-all",
         hasOtherClients: connectedSockets.size > 1
       })
     );
@@ -113,15 +115,19 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
   connection.socket.on("message", (rawMessage) => {
     try {
       const data = JSON.parse(rawMessage.toString());
-      const { type, clientId, trackId, position, isPlaying } = data;
+      const { type, clientId, trackId, position, isPlaying, playMode } = data;
 
       if (trackId !== undefined) {
         activeSession = {
           trackId,
           position: position ?? 0,
           isPlaying: !!isPlaying,
+          playMode: playMode ?? activeSession?.playMode ?? "repeat-all",
           updatedAt: Date.now()
         };
+      } else if (playMode !== undefined && activeSession) {
+        activeSession.playMode = playMode;
+        activeSession.updatedAt = Date.now();
       }
 
       for (const socket of connectedSockets) {
@@ -132,7 +138,8 @@ app.get("/ws/sync", { websocket: true } as any, (connection: any, req: any) => {
               clientId,
               trackId,
               position,
-              isPlaying
+              isPlaying,
+              playMode
             })
           );
         }
@@ -405,41 +412,6 @@ app.get<{ Params: { trackId: string } }>("/api/audio/:trackId/lyrics", async (re
     | undefined;
   if (!track) return reply.code(404).send({ error: "track_not_found" });
 
-  if (track.filePath.startsWith("smb://")) {
-    const { host, shareName, remotePath } = parseSmbUri(track.filePath);
-    const creds = getSmbCredentials(host, shareName);
-    if (!creds) return { kind: "none", lines: [] };
-
-    const client = getSmbClient({
-      host: creds.host,
-      port: creds.port,
-      username: creds.username || undefined,
-      password: creds.password || undefined,
-      shareName: creds.shareName
-    });
-
-    try {
-      const baseRemotePath = remotePath.slice(0, -extname(remotePath).length);
-      for (const extension of [".lrc", ".txt"]) {
-        try {
-          const sidecarPath = `${baseRemotePath}${extension}`;
-          if (await smbExists(client, sidecarPath)) {
-            const buffer = await smbReadFile(client, sidecarPath);
-            const text = buffer.toString("utf-8");
-            return { kind: extension === ".lrc" ? "lrc" : "plain", lines: parseLyrics(text) };
-          }
-        } catch {
-          // Try next
-        }
-      }
-    } finally {
-      try {
-        client.close();
-      } catch {}
-    }
-    return { kind: "none", lines: [] };
-  }
-
   const basePath = track.filePath.slice(0, -extname(track.filePath).length);
   for (const extension of [".lrc", ".txt"]) {
     try {
@@ -471,45 +443,7 @@ app.delete<{ Params: { rootId: string } }>("/api/roots/:rootId", async (request)
   return { ok: true };
 });
 
-app.get("/api/roots/smb", async () => {
-  return db
-    .prepare("SELECT id, host, port, username, password, share_name AS shareName, path, enabled, last_scanned_at AS lastScannedAt, created_at AS createdAt FROM smb_roots ORDER BY created_at DESC")
-    .all();
-});
 
-app.post<{
-  Body: { host: string; port?: number; username?: string; password?: string; shareName: string; path: string };
-}>("/api/roots/smb", async (request, reply) => {
-  const { host, port = 445, username, password, shareName, path } = request.body;
-  try {
-    const id = "smb-" + randomUUID().slice(0, 8);
-    db.prepare(`
-      INSERT INTO smb_roots (id, host, port, username, password, share_name, path)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, host, port, username || null, password || null, shareName, path);
-
-    return { id, host, port, username, password, shareName, path, enabled: 1, lastScannedAt: null };
-  } catch (error) {
-    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.post<{
-  Body: { host: string; port?: number; username?: string; password?: string; shareName: string; path: string };
-}>("/api/roots/smb/test", async (request, reply) => {
-  const { host, port = 445, username, password, shareName } = request.body;
-  try {
-    await testSmbConnection({ host, port, username, password, shareName });
-    return { ok: true };
-  } catch (error) {
-    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-app.delete<{ Params: { rootId: string } }>("/api/roots/smb/:rootId", async (request) => {
-  db.prepare("DELETE FROM smb_roots WHERE id = ?").run(request.params.rootId);
-  return { ok: true };
-});
 
 app.post("/api/scan", async () => {
   return scanLibrary(db);
@@ -528,77 +462,7 @@ async function ensureFile(filePath: string) {
   return fileStat;
 }
 
-function parseSmbUri(uri: string) {
-  const match = uri.match(/^smb:\/\/([^/]+)\/([^/]+)\/(.+)$/);
-  if (!match) throw new Error("Invalid SMB URI");
-  return {
-    host: match[1],
-    shareName: match[2],
-    remotePath: match[3]
-  };
-}
-
-function getSmbCredentials(host: string, shareName: string) {
-  return db
-    .prepare("SELECT host, port, username, password, share_name AS shareName FROM smb_roots WHERE host = ? AND share_name = ? AND enabled = 1 LIMIT 1")
-    .get(host, shareName) as { host: string; port: number; username?: string; password?: string; shareName: string } | undefined;
-}
-
-async function getSmbFileSize(client: any, remotePath: string): Promise<number> {
-  const dir = dirname(remotePath);
-  const fileBasename = basename(remotePath);
-  const files = await smbReaddir(client, dir === "." || dir === "" ? "" : dir);
-  const fileStats = files.find((f: any) => f.name.toLowerCase() === fileBasename.toLowerCase());
-  if (!fileStats) {
-    throw new Error(`File not found: ${remotePath}`);
-  }
-  return fileStats.size || 0;
-}
-
 async function streamFileWithRange(filePath: string, rangeHeader: string | undefined, reply: FastifyReply) {
-  if (filePath.startsWith("smb://")) {
-    const { host, shareName, remotePath } = parseSmbUri(filePath);
-    const creds = getSmbCredentials(host, shareName);
-    if (!creds) {
-      return reply.code(401).send({ error: "smb_credentials_not_found" });
-    }
-
-    const client = getSmbClient({
-      host: creds.host,
-      port: creds.port,
-      username: creds.username || undefined,
-      password: creds.password || undefined,
-      shareName: creds.shareName
-    });
-
-    reply.raw.on("close", () => {
-      try {
-        client.close();
-      } catch {}
-    });
-
-    try {
-      const fileSize = await getSmbFileSize(client, remotePath);
-      reply.header("Accept-Ranges", "bytes");
-      const range = parseRangeHeader(rangeHeader, fileSize);
-      if (range) {
-        reply.code(206);
-        reply.header("Content-Range", `bytes ${range.start}-${range.end}/${fileSize}`);
-        reply.header("Content-Length", String(range.end - range.start + 1));
-        const stream = await smbCreateReadStream(client, remotePath, { start: range.start, end: range.end });
-        return reply.send(stream);
-      }
-      reply.header("Content-Length", String(fileSize));
-      const stream = await smbCreateReadStream(client, remotePath);
-      return reply.send(stream);
-    } catch (error) {
-      try {
-        client.close();
-      } catch {}
-      return reply.code(500).send({ error: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
   const fileStat = await ensureFile(filePath);
   reply.header("Accept-Ranges", "bytes");
   const range = parseRangeHeader(rangeHeader, fileStat.size);
