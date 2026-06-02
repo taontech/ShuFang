@@ -1838,25 +1838,43 @@ function PodcastsView({
   }, [books]);
 
   const recommendedByBooks = useMemo(() => {
-    const list = readingBooks.length > 0 ? readingBooks : books;
-    return list.slice(0, 3);
+    const seen = new Set<string>();
+    const candidates = [
+      ...[...books]
+        .filter((book) => book.recentReadAt)
+        .sort((a, b) => dateValue(b.recentReadAt) - dateValue(a.recentReadAt)),
+      ...[...readingBooks].sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt)),
+      ...[...books].sort((a, b) => dateValue(b.updatedAt) - dateValue(a.updatedAt))
+    ];
+
+    return candidates.filter((book) => {
+      if (seen.has(book.id)) return false;
+      seen.add(book.id);
+      return true;
+    }).slice(0, 3);
   }, [readingBooks, books]);
+
+  const latestReadBook = recommendedByBooks[0] ?? null;
 
   const keywords = useMemo(() => {
     return recommendedByBooks
-      .map((b) => b.title.replace(/[:：(（].*$/, "").trim())
+      .flatMap((b) => {
+        const title = b.title.replace(/[:：(（].*$/, "").trim();
+        return [title, b.author ? `${title} ${b.author}` : ""];
+      })
       .filter(Boolean);
   }, [recommendedByBooks]);
 
   const [podcasts, setPodcasts] = useState<any[]>([]);
   const [popularPodcasts, setPopularPodcasts] = useState<any[]>([]);
-  const [bgmPodcasts, setBgmPodcasts] = useState<any[]>([]);
+  const [musicPodcasts, setMusicPodcasts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selectedPodcast, setSelectedPodcast] = useState<any | null>(null);
   const [episodes, setEpisodes] = useState<any[]>([]);
   const [episodesLoading, setEpisodesLoading] = useState(false);
   const [expandedEpisodeIndex, setExpandedEpisodeIndex] = useState<number | null>(null);
+  const [recommendationRefreshKey, setRecommendationRefreshKey] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -1864,26 +1882,22 @@ function PodcastsView({
       setLoading(true);
       setError("");
       try {
-        const [popular, bgm] = await Promise.all([
+        const [popular, musicChart] = await Promise.all([
           fetchPopular(),
-          fetchBackgroundMusic()
+          fetchPopularMusicPodcasts()
         ]);
         if (!active) return;
 
-        setBgmPodcasts(bgm.slice(0, 15));
+        setMusicPodcasts(musicChart.slice(0, 15));
 
         if (keywords.length === 0) {
-          // If keywords is empty:
-          // AI recommended content = top 10 popular podcasts
-          // Hot Podcasts = remaining 20 popular podcasts
           setPodcasts(popular.slice(0, 10));
           setPopularPodcasts(popular.slice(10));
         } else {
-          // Search with keywords
           const results = await Promise.all(
             keywords.map((kw) =>
               fetch(
-                `https://itunes.apple.com/search?term=${encodeURIComponent(kw)}&media=podcast&limit=12&country=cn`
+                `https://itunes.apple.com/search?term=${encodeURIComponent(kw)}&media=podcast&limit=16&country=cn`
               )
                 .then((res) => res.json())
                 .then((data) => data.results || [])
@@ -1910,12 +1924,11 @@ function PodcastsView({
           });
 
           if (unique.length === 0) {
-            // Fallback to top 10 popular podcasts if no results found
             setPodcasts(popular.slice(0, 10));
             setPopularPodcasts(popular.slice(10));
           } else {
-            // Slice recommended to max 10
-            setPodcasts(unique.slice(0, 10));
+            const offset = recommendationRefreshKey % Math.max(unique.length - 9, 1);
+            setPodcasts(unique.slice(offset, offset + 10));
             setPopularPodcasts(popular);
           }
         }
@@ -1951,38 +1964,27 @@ function PodcastsView({
       }
     };
 
-    const fetchBackgroundMusic = async () => {
+    const fetchPopularMusicPodcasts = async () => {
       try {
-        const terms = ["背景音乐", "轻音乐", "白噪音", "Lofi"];
-        const results = await Promise.all(
-          terms.map((term) =>
-            fetch(
-              `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=podcast&limit=15&country=cn`
-            )
-              .then((res) => res.json())
-              .then((data) => data.results || [])
-              .catch(() => [])
-          )
-        );
-        const flat = results.flat();
-        const seen = new Set();
-        const unique = flat.filter((item) => {
-          if (seen.has(item.collectionId)) return false;
-          seen.add(item.collectionId);
-          return true;
-        }).map((item) => {
-          const rawCover = item.artworkUrl600 || item.artworkUrl100 || "";
+        const res = await fetch("https://itunes.apple.com/cn/rss/toppodcasts/limit=30/genre=1310/json");
+        const data = await res.json();
+        const entries = data.feed?.entry || [];
+        return entries.map((entry: any, index: number) => {
+          const rawCover = entry["im:image"][2]?.label || "";
           const highResCover = rawCover.replace(/\/\d+x\d+/g, "/600x600");
           return {
-            ...item,
+            collectionId: entry.id.attributes["im:id"],
+            collectionName: entry["im:name"].label,
+            artistName: entry["im:artist"].label,
             artworkUrl100: highResCover,
             artworkUrl600: highResCover,
-            primaryGenreName: item.primaryGenreName === "Podcasts" ? "背景音乐" : (item.primaryGenreName || "背景音乐")
+            primaryGenreName: "音乐播客",
+            chartRank: index + 1,
+            isMusicChart: true
           };
         });
-        return unique;
       } catch (err) {
-        console.error("Fetch background music failed", err);
+        console.error("Fetch music podcasts failed", err);
         return [];
       }
     };
@@ -1991,7 +1993,7 @@ function PodcastsView({
     return () => {
       active = false;
     };
-  }, [keywords]);
+  }, [keywords, recommendationRefreshKey]);
 
   useEffect(() => {
     if (!selectedPodcast) {
@@ -2195,24 +2197,33 @@ function PodcastsView({
         <>
           <section className="podcast-hero">
             <div className="podcast-hero-content">
-              <span className="podcast-badge">
+              <button 
+                className="podcast-badge podcast-ai-button"
+                onClick={() => setRecommendationRefreshKey((key) => key + 1)}
+                disabled={loading}
+                type="button"
+                title="根据最近阅读的书重新推荐播客"
+              >
                 <Sparkles size={13} />
-                AI 智能推荐
-              </span>
+                {loading ? "正在推荐" : "AI 智能推荐"}
+                <RefreshCw size={12} className={loading ? "spin" : ""} />
+              </button>
               <h1>播客书窗</h1>
               <p className="podcast-desc">将好书的声音带进耳朵。根据您的书架内容智能定制推荐。</p>
               
               <div className="podcast-sources">
-                <span className="source-label">推荐源自您正在看的书：</span>
+                <span className="source-label">
+                  {latestReadBook ? "优先根据最近阅读推荐：" : "推荐源自您正在看的书："}
+                </span>
                 <div className="source-chips">
                   {recommendedByBooks.length > 0 ? (
-                    recommendedByBooks.map((b) => (
-                      <span className="source-chip" key={b.id}>
-                        📖 {b.title}
+                    recommendedByBooks.map((b, index) => (
+                      <span className={`source-chip ${index === 0 ? "latest" : ""}`} key={b.id}>
+                        {index === 0 ? "最近" : "阅读"} · {b.title}
                       </span>
                     ))
                   ) : (
-                    <span className="source-chip popular">🔥 当前最热门播客</span>
+                    <span className="source-chip popular">当前最热门播客</span>
                   )}
                 </div>
               </div>
@@ -2249,39 +2260,28 @@ function PodcastsView({
 
           <div className="podcast-section">
             <h2 className="podcast-section-title">
-              伴读音乐 & 沉浸白噪音
-              <span className="podcast-badge-bgm" style={{ 
-                background: 'linear-gradient(135deg, hsl(270, 50%, 12%) 0%, hsl(280, 45%, 8%) 100%)',
-                border: '1px solid rgba(168, 85, 247, 0.35)',
-                color: 'hsl(270, 80%, 75%)',
-                fontSize: '10px',
-                padding: '3px 9px',
-                borderRadius: '99px',
-                fontWeight: 700,
-                marginLeft: '10px',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '4px',
-                verticalAlign: 'middle'
-              }}>
-                🎧 适合专注伴读
+              热门音乐播客
+              <span className="podcast-badge-bgm">
+                Apple Podcasts 音乐榜
               </span>
             </h2>
             {loading ? (
               <div className="podcast-loading">
                 <RefreshCw size={24} className="spin" />
-                <span>搜寻专注伴读背景音乐中...</span>
+                <span>加载当前热门音乐播客中...</span>
               </div>
-            ) : bgmPodcasts.length > 0 ? (
+            ) : musicPodcasts.length > 0 ? (
               <div className="podcast-recommendation-row">
-                {bgmPodcasts.map((p) => (
+                {musicPodcasts.map((p) => (
                   <div className="podcast-card bgm-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
                     <div 
                       className="podcast-card-cover"
                       style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
                     />
                     <div className="podcast-card-body">
-                      <span className="podcast-card-genre bgm-genre">{p.primaryGenreName || "背景音乐"}</span>
+                      <span className="podcast-card-genre bgm-genre">
+                        {p.chartRank ? `音乐榜 #${p.chartRank}` : (p.primaryGenreName || "音乐播客")}
+                      </span>
                       <h3 className="podcast-card-title" title={p.collectionName}>{p.collectionName}</h3>
                       <p className="podcast-card-artist" title={p.artistName}>{p.artistName}</p>
                     </div>
@@ -2289,7 +2289,7 @@ function PodcastsView({
                 ))}
               </div>
             ) : (
-              <div className="podcast-empty">暂无伴读背景音乐</div>
+              <div className="podcast-empty">暂无热门音乐播客</div>
             )}
           </div>
 
