@@ -120,6 +120,7 @@ function App() {
   const [music, setMusic] = useState<AudioTrack[]>([]);
   const [recentMusic, setRecentMusic] = useState<AudioTrack[]>([]);
   const [podcasts, setPodcasts] = useState<AudioTrack[]>([]);
+  const [activeQueue, setActiveQueue] = useState<AudioTrack[]>([]);
   const queue = useMemo(() => [...music, ...podcasts], [music, podcasts]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [readingActivity, setReadingActivity] = useState<ReadingActivity[]>([]);
@@ -144,8 +145,7 @@ function App() {
   const previousViewRef = useRef<View>("books");
   const returningFromReaderRef = useRef(false);
 
-  const [isSyncEnabled, setIsSyncEnabled] = useState(true);
-  const [showSyncDialog, setShowSyncDialog] = useState(false);
+  const [isSyncEnabled, setIsSyncEnabled] = useState(false);
   const [pendingSession, setPendingSession] = useState<{ trackId: string; position: number; isPlaying: boolean; playMode?: PlayMode; track?: AudioTrack } | null>(null);
 
   const clientId = useMemo(() => {
@@ -227,13 +227,12 @@ function App() {
           if (type === "SESSION_STATE") {
             if (message.hasOtherClients) {
               setPendingSession({ trackId, position, isPlaying: msgIsPlaying, playMode: msgPlayMode, track: message.track });
-            } else {
+            } else if (isSyncEnabled) {
               const track = queue.find((t) => t.id === trackId) || message.track;
               if (track) {
                 isApplyingWsUpdateRef.current = true;
                 setCurrentTrack(track);
                 setIsPlaying(msgIsPlaying);
-                setIsSyncEnabled(true);
                 if (msgPlayMode) setPlayMode(msgPlayMode);
                 setTimeout(() => {
                   if (audioRef.current) {
@@ -313,47 +312,38 @@ function App() {
     };
   }, [clientId, queue, isSyncEnabled]);
 
-  useEffect(() => {
-    if (pendingSession && !showSyncDialog) {
-      const track = queue.find((t) => t.id === pendingSession.trackId) || pendingSession.track;
-      if (track) {
-        setShowSyncDialog(true);
-      }
-    }
-  }, [queue, pendingSession, showSyncDialog]);
-
-  const joinSync = () => {
-    if (pendingSession) {
-      const track = queue.find((t) => t.id === pendingSession.trackId) || pendingSession.track;
-      if (track) {
-        isApplyingWsUpdateRef.current = true;
-        setCurrentTrack(track);
-        setIsPlaying(true);
-        setIsSyncEnabled(true);
-        if (pendingSession.playMode) {
-          setPlayMode(pendingSession.playMode);
-        }
-
-        setTimeout(() => {
-          if (audioRef.current) {
-            audioRef.current.currentTime = pendingSession.position;
-            setAudioPosition(pendingSession.position);
-            void audioRef.current.play().catch((err) => {
-              console.error("Autoplay failed:", err);
-            });
+  const handleToggleSync = (value: boolean) => {
+    if (value) {
+      if (pendingSession) {
+        const track = queue.find((t) => t.id === pendingSession.trackId) || pendingSession.track;
+        if (track) {
+          isApplyingWsUpdateRef.current = true;
+          setCurrentTrack(track);
+          setIsPlaying(true);
+          setIsSyncEnabled(true);
+          if (pendingSession.playMode) {
+            setPlayMode(pendingSession.playMode);
           }
-          isApplyingWsUpdateRef.current = false;
-        }, 150);
-      }
-    }
-    setShowSyncDialog(false);
-    setPendingSession(null);
-  };
 
-  const declineSync = () => {
-    setShowSyncDialog(false);
-    setPendingSession(null);
-    setIsSyncEnabled(false);
+          setTimeout(() => {
+            if (audioRef.current) {
+              audioRef.current.currentTime = pendingSession.position;
+              setAudioPosition(pendingSession.position);
+              void audioRef.current.play().catch((err) => {
+                console.error("Autoplay failed:", err);
+              });
+            }
+            isApplyingWsUpdateRef.current = false;
+          }, 150);
+        }
+        setPendingSession(null);
+      } else {
+        setIsSyncEnabled(true);
+      }
+    } else {
+      setIsSyncEnabled(false);
+      setPendingSession(null);
+    }
   };
 
   useEffect(() => {
@@ -535,9 +525,18 @@ function App() {
     }
   };
 
-  const playTrack = (track: AudioTrack) => {
+  const playTrack = (track: AudioTrack, customQueue?: AudioTrack[]) => {
     setCurrentTrack(track);
     setIsPlaying(true);
+    if (customQueue) {
+      setActiveQueue(customQueue);
+    } else {
+      if (track.kind === "podcast") {
+        setActiveQueue(podcasts.filter(t => t.album === track.album));
+      } else {
+        setActiveQueue(music);
+      }
+    }
     sendWsMessage("TRACK_CHANGE", { trackId: track.id, position: 0, isPlaying: true, track });
     void saveAudioProgress(track, 0);
   };
@@ -545,11 +544,76 @@ function App() {
 
 
   const playNextTrack = () => {
-    if (queue.length === 0) return;
     if (!currentTrack) {
+      if (queue.length === 0) return;
       playTrack(queue[0]);
       return;
     }
+
+    if (currentTrack.kind === "podcast") {
+      if (playMode === "repeat-one") {
+        if (audioRef.current) {
+          audioRef.current.currentTime = 0;
+          void audioRef.current.play();
+        }
+        setIsPlaying(true);
+        return;
+      }
+
+      // Find the episodes of the current program
+      let programTracks: AudioTrack[] = [];
+      if (activeQueue.length > 0 && activeQueue.some(t => t.kind === "podcast" && t.album === currentTrack.album)) {
+        programTracks = activeQueue.filter(t => t.kind === "podcast" && t.album === currentTrack.album);
+      } else {
+        programTracks = podcasts.filter(t => t.album === currentTrack.album);
+      }
+
+      if (programTracks.length === 0) {
+        setIsPlaying(false);
+        if (audioRef.current) {
+          audioRef.current.pause();
+        }
+        return;
+      }
+
+      const index = programTracks.findIndex(t => t.id === currentTrack.id || (t.filePath && t.filePath === currentTrack.filePath));
+      if (index === -1) {
+        setIsPlaying(false);
+        if (audioRef.current) {
+          audioRef.current.pause();
+        }
+        return;
+      }
+
+      if (playMode === "shuffle") {
+        const choices = programTracks.filter((track) => track.id !== currentTrack.id && track.filePath !== currentTrack.filePath);
+        if (choices.length > 0) {
+          const nextTrack = choices[Math.floor(Math.random() * choices.length)];
+          playTrack(nextTrack, programTracks);
+        } else {
+          setIsPlaying(false);
+          if (audioRef.current) {
+            audioRef.current.pause();
+          }
+        }
+        return;
+      }
+
+      const nextIndex = index + 1;
+      if (nextIndex < programTracks.length) {
+        const nextTrack = programTracks[nextIndex];
+        playTrack(nextTrack, programTracks);
+      } else {
+        // Automatically stop playing when current program is finished
+        setIsPlaying(false);
+        if (audioRef.current) {
+          audioRef.current.pause();
+        }
+      }
+      return;
+    }
+
+    if (queue.length === 0) return;
     if (playMode === "repeat-one") {
       if (audioRef.current) {
         audioRef.current.currentTime = 0;
@@ -784,7 +848,7 @@ function App() {
         seek={seekAudio}
         activeLyric={currentLyricText}
         isSyncEnabled={isSyncEnabled}
-        setIsSyncEnabled={setIsSyncEnabled}
+        setIsSyncEnabled={handleToggleSync}
         hasLyrics={lyrics.length > 0}
       />
       <AnimatePresence>
@@ -824,14 +888,6 @@ function App() {
           />
         )}
       </AnimatePresence>
-      <AnimatePresence>
-        {showSyncDialog && (
-          <SyncConfirmationModal
-            onConfirm={joinSync}
-            onDecline={declineSync}
-          />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -867,7 +923,7 @@ function HomeView({
   books: BookItem[];
   tracks: AudioTrack[];
   openBook: (bookId: string) => void;
-  playTrack: (track: AudioTrack) => void;
+  playTrack: (track: AudioTrack, customQueue?: AudioTrack[]) => void;
   readingActivity: ReadingActivity[];
   goBooks: () => void;
   goMusic: () => void;
@@ -1772,7 +1828,7 @@ function PodcastsView({
   setIsPlaying
 }: {
   books: BookItem[];
-  playTrack: (track: AudioTrack) => void;
+  playTrack: (track: AudioTrack, customQueue?: AudioTrack[]) => void;
   currentTrack: AudioTrack | null;
   isPlaying: boolean;
   setIsPlaying: (value: boolean) => void;
@@ -1793,6 +1849,8 @@ function PodcastsView({
   }, [recommendedByBooks]);
 
   const [podcasts, setPodcasts] = useState<any[]>([]);
+  const [popularPodcasts, setPopularPodcasts] = useState<any[]>([]);
+  const [bgmPodcasts, setBgmPodcasts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selectedPodcast, setSelectedPodcast] = useState<any | null>(null);
@@ -1806,43 +1864,64 @@ function PodcastsView({
       setLoading(true);
       setError("");
       try {
-        if (keywords.length === 0) {
-          const popular = await fetchPopular();
-          if (active) setPodcasts(popular);
-          return;
-        }
-
-        const results = await Promise.all(
-          keywords.map((kw) =>
-            fetch(
-              `https://itunes.apple.com/search?term=${encodeURIComponent(kw)}&media=podcast&limit=12&country=cn`
-            )
-              .then((res) => res.json())
-              .then((data) => data.results || [])
-              .catch(() => [])
-          )
-        );
-
+        const [popular, bgm] = await Promise.all([
+          fetchPopular(),
+          fetchBackgroundMusic()
+        ]);
         if (!active) return;
 
-        const flat = results.flat();
-        const seen = new Set();
-        const unique = flat.filter((item) => {
-          if (seen.has(item.collectionId)) return false;
-          seen.add(item.collectionId);
-          return true;
-        });
+        setBgmPodcasts(bgm.slice(0, 15));
 
-        if (unique.length === 0) {
-          const popular = await fetchPopular();
-          if (active) setPodcasts(popular);
+        if (keywords.length === 0) {
+          // If keywords is empty:
+          // AI recommended content = top 10 popular podcasts
+          // Hot Podcasts = remaining 20 popular podcasts
+          setPodcasts(popular.slice(0, 10));
+          setPopularPodcasts(popular.slice(10));
         } else {
-          if (active) setPodcasts(unique);
+          // Search with keywords
+          const results = await Promise.all(
+            keywords.map((kw) =>
+              fetch(
+                `https://itunes.apple.com/search?term=${encodeURIComponent(kw)}&media=podcast&limit=12&country=cn`
+              )
+                .then((res) => res.json())
+                .then((data) => data.results || [])
+                .catch(() => [])
+            )
+          );
+
+          if (!active) return;
+
+          const flat = results.flat();
+          const seen = new Set();
+          const unique = flat.filter((item) => {
+            if (seen.has(item.collectionId)) return false;
+            seen.add(item.collectionId);
+            return true;
+          }).map((item) => {
+            const rawCover = item.artworkUrl600 || item.artworkUrl100 || "";
+            const highResCover = rawCover.replace(/\/\d+x\d+/g, "/600x600");
+            return {
+              ...item,
+              artworkUrl100: highResCover,
+              artworkUrl600: highResCover
+            };
+          });
+
+          if (unique.length === 0) {
+            // Fallback to top 10 popular podcasts if no results found
+            setPodcasts(popular.slice(0, 10));
+            setPopularPodcasts(popular.slice(10));
+          } else {
+            // Slice recommended to max 10
+            setPodcasts(unique.slice(0, 10));
+            setPopularPodcasts(popular);
+          }
         }
       } catch (err) {
         console.error(err);
-        const popular = await fetchPopular();
-        if (active) setPodcasts(popular);
+        setError("加载播客内容失败");
       } finally {
         if (active) setLoading(false);
       }
@@ -1853,17 +1932,57 @@ function PodcastsView({
         const res = await fetch("https://itunes.apple.com/cn/rss/toppodcasts/limit=30/json");
         const data = await res.json();
         const entries = data.feed?.entry || [];
-        return entries.map((entry: any) => ({
-          collectionId: entry.id.attributes["im:id"],
-          collectionName: entry["im:name"].label,
-          artistName: entry["im:artist"].label,
-          artworkUrl100: entry["im:image"][2].label,
-          artworkUrl600: entry["im:image"][2].label,
-          primaryGenreName: entry.category.attributes.label,
-          isPopular: true
-        }));
+        return entries.map((entry: any) => {
+          const rawCover = entry["im:image"][2]?.label || "";
+          const highResCover = rawCover.replace(/\/\d+x\d+/g, "/600x600");
+          return {
+            collectionId: entry.id.attributes["im:id"],
+            collectionName: entry["im:name"].label,
+            artistName: entry["im:artist"].label,
+            artworkUrl100: highResCover,
+            artworkUrl600: highResCover,
+            primaryGenreName: entry.category.attributes.label,
+            isPopular: true
+          };
+        });
       } catch (err) {
         console.error("Fetch popular failed", err);
+        return [];
+      }
+    };
+
+    const fetchBackgroundMusic = async () => {
+      try {
+        const terms = ["背景音乐", "轻音乐", "白噪音", "Lofi"];
+        const results = await Promise.all(
+          terms.map((term) =>
+            fetch(
+              `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&media=podcast&limit=15&country=cn`
+            )
+              .then((res) => res.json())
+              .then((data) => data.results || [])
+              .catch(() => [])
+          )
+        );
+        const flat = results.flat();
+        const seen = new Set();
+        const unique = flat.filter((item) => {
+          if (seen.has(item.collectionId)) return false;
+          seen.add(item.collectionId);
+          return true;
+        }).map((item) => {
+          const rawCover = item.artworkUrl600 || item.artworkUrl100 || "";
+          const highResCover = rawCover.replace(/\/\d+x\d+/g, "/600x600");
+          return {
+            ...item,
+            artworkUrl100: highResCover,
+            artworkUrl600: highResCover,
+            primaryGenreName: item.primaryGenreName === "Podcasts" ? "背景音乐" : (item.primaryGenreName || "背景音乐")
+          };
+        });
+        return unique;
+      } catch (err) {
+        console.error("Fetch background music failed", err);
         return [];
       }
     };
@@ -1908,119 +2027,122 @@ function PodcastsView({
 
   return (
     <div className="podcasts-layout">
-      <section className="podcast-hero">
-        <div className="podcast-hero-content">
-          <span className="podcast-badge">
-            <Sparkles size={13} />
-            AI 智能推荐
-          </span>
-          <h1>播客书窗</h1>
-          <p className="podcast-desc">将好书的声音带进耳朵。根据您的书架内容智能定制推荐。</p>
-          
-          <div className="podcast-sources">
-            <span className="source-label">推荐源自您正在看的书：</span>
-            <div className="source-chips">
-              {recommendedByBooks.length > 0 ? (
-                recommendedByBooks.map((b) => (
-                  <span className="source-chip" key={b.id}>
-                    📖 {b.title}
-                  </span>
-                ))
-              ) : (
-                <span className="source-chip popular">🔥 当前最热门播客</span>
-              )}
-            </div>
+      {selectedPodcast ? (
+        <div className="podcast-detail-view animate-fade-in">
+          <div className="podcast-detail-header">
+            <button className="podcast-back-btn" onClick={() => setSelectedPodcast(null)}>
+              <ChevronLeft size={16} />
+              <span>返回播客书窗</span>
+            </button>
           </div>
-        </div>
-      </section>
 
-      {loading ? (
-        <div className="podcast-loading">
-          <RefreshCw size={24} className="spin" />
-          <span>正在搜寻与书籍相关的电台...</span>
-        </div>
-      ) : (
-        <div className="podcast-grid">
-          {podcasts.map((p) => (
-            <div className="podcast-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
+          <div className="podcast-detail-container">
+            {/* Left Column: Rich Metadata Card */}
+            <div className="podcast-detail-sidebar">
               <div 
-                className="podcast-card-cover"
-                style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
+                className="podcast-detail-cover"
+                style={{ backgroundImage: coverBackground(selectedPodcast.artworkUrl600 || selectedPodcast.artworkUrl100) }}
               />
-              <div className="podcast-card-body">
-                <span className="podcast-card-genre">{p.primaryGenreName || "播客"}</span>
-                <h3 className="podcast-card-title">{p.collectionName}</h3>
-                <p className="podcast-card-artist">{p.artistName}</p>
+              <div className="podcast-detail-info">
+                <span className="podcast-detail-genre">{selectedPodcast.primaryGenreName || "播客"}</span>
+                <h2>{selectedPodcast.collectionName}</h2>
+                <p className="podcast-detail-artist">{selectedPodcast.artistName}</p>
+              </div>
+              
+              <div className="podcast-meta-list">
+                <div className="podcast-meta-item">
+                  <span className="meta-label">📅 首播日期</span>
+                  <span className="meta-value">
+                    {selectedPodcast.releaseDate ? new Date(selectedPodcast.releaseDate).toLocaleDateString() : "未知"}
+                  </span>
+                </div>
+                <div className="podcast-meta-item">
+                  <span className="meta-label">🎵 单集数量</span>
+                  <span className="meta-value">{episodes.length || selectedPodcast.trackCount || 0} 集</span>
+                </div>
+                <div className="podcast-meta-item">
+                  <span className="meta-label">🌍 发行地区</span>
+                  <span className="meta-value">{selectedPodcast.country || "CN"}</span>
+                </div>
+                {selectedPodcast.feedUrl && (
+                  <div className="podcast-meta-item feed-section">
+                    <span className="meta-label">🔗 订阅源 (RSS Feed)</span>
+                    <button 
+                      className="copy-feed-btn"
+                      onClick={() => {
+                        navigator.clipboard.writeText(selectedPodcast.feedUrl);
+                        alert("播客订阅源已成功复制到剪贴板！");
+                      }}
+                    >
+                      复制 RSS 链接
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-          ))}
-        </div>
-      )}
 
-      <AnimatePresence>
-        {selectedPodcast && (
-          <div className="podcast-drawer-backdrop" onClick={() => setSelectedPodcast(null)}>
-            <motion.div 
-              className="podcast-drawer"
-              initial={{ x: "100%" }}
-              animate={{ x: 0 }}
-              exit={{ x: "100%" }}
-              transition={{ type: "spring", damping: 25, stiffness: 220 }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="podcast-drawer-header">
-                <button className="icon-button close-drawer-btn" onClick={() => setSelectedPodcast(null)}>
-                  <X size={18} />
-                </button>
-                <div className="podcast-drawer-meta">
-                  <div 
-                    className="podcast-drawer-art"
-                    style={{ backgroundImage: coverBackground(selectedPodcast.artworkUrl600 || selectedPodcast.artworkUrl100) }}
-                  />
-                  <div>
-                    <h2>{selectedPodcast.collectionName}</h2>
-                    <p>{selectedPodcast.artistName}</p>
-                  </div>
+            {/* Right Column: Rich Interactive Episode List */}
+            <div className="podcast-detail-content">
+              <h3>近期单集 ({episodes.length})</h3>
+              {episodesLoading ? (
+                <div className="episodes-loading">
+                  <RefreshCw size={24} className="spin" />
+                  <span>加载单集中...</span>
                 </div>
-              </div>
-
-              <div className="podcast-drawer-body">
-                <h3>近期单集</h3>
-                {episodesLoading ? (
-                  <div className="episodes-loading">
-                    <RefreshCw size={20} className="spin" />
-                    <span>加载单集中...</span>
-                  </div>
-                ) : episodes.length > 0 ? (
-                  <div className="episodes-list">
-                    {episodes.map((ep, idx) => {
-                      const isCurrentEp = currentTrack?.filePath === ep.episodeUrl;
-                      const isExpanded = expandedEpisodeIndex === idx;
-                      
-                      return (
-                        <div 
-                          className={`episode-item ${isCurrentEp ? "active" : ""}`} 
-                          key={ep.trackId || idx}
-                        >
-                          <div className="episode-item-header" onClick={() => setExpandedEpisodeIndex(isExpanded ? null : idx)}>
-                            <div className="episode-title-block">
-                              <h4>{ep.trackName}</h4>
-                              <div className="episode-meta-row">
-                                <span>🗓️ {ep.releaseDate ? new Date(ep.releaseDate).toLocaleDateString() : "未知"}</span>
-                                <span>
-                                  ⏱️ {ep.trackTimeMillis ? Math.round(ep.trackTimeMillis / 60000) : 0} 分钟
+              ) : episodes.length > 0 ? (
+                <div className="episodes-list inline-list">
+                  {episodes.map((ep, idx) => {
+                    const isCurrentEp = currentTrack?.filePath === ep.episodeUrl;
+                    const isExpanded = expandedEpisodeIndex === idx;
+                    
+                    return (
+                      <div 
+                        className={`episode-item rich-card ${isCurrentEp ? "active" : ""}`} 
+                        key={ep.trackId || idx}
+                      >
+                        <div className="episode-item-header" onClick={() => setExpandedEpisodeIndex(isExpanded ? null : idx)}>
+                          <div className="episode-title-block">
+                            <h4>{ep.trackName}</h4>
+                            <div className="episode-meta-row">
+                              <span>🗓️ {ep.releaseDate ? new Date(ep.releaseDate).toLocaleDateString() : "未知"}</span>
+                              <span>⏱️ {ep.trackTimeMillis ? Math.round(ep.trackTimeMillis / 60000) : 0} 分钟</span>
+                              {isCurrentEp && isPlaying && (
+                                <span className="playing-badge">
+                                  <span className="wave-bar wave-1"></span>
+                                  <span className="wave-bar wave-2"></span>
+                                  <span className="wave-bar wave-3"></span>
+                                  正在播放
                                 </span>
-                              </div>
+                              )}
                             </div>
+                          </div>
+                          
+                          <div className="episode-actions" onClick={(e) => e.stopPropagation()}>
+                            <button 
+                              className="text-action-btn"
+                              onClick={() => setExpandedEpisodeIndex(isExpanded ? null : idx)}
+                            >
+                              {isExpanded ? "收起介绍" : "查看介绍"}
+                            </button>
+                            
                             <button 
                               className={`play-episode-btn ${isCurrentEp && isPlaying ? "playing" : ""}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
+                              onClick={() => {
                                 if (isCurrentEp) {
                                   setIsPlaying(!isPlaying);
                                 } else {
-                                  const track: AudioTrack = {
-                                    id: `podcast-ep-${ep.trackId || ep.collectionId}-${Date.now()}`,
+                                  const trackList: AudioTrack[] = episodes.map((item, index) => ({
+                                    id: `podcast-ep-${item.trackId || item.collectionId}-${index}`,
+                                    title: item.trackName,
+                                    artist: selectedPodcast.artistName,
+                                    album: selectedPodcast.collectionName,
+                                    duration: item.trackTimeMillis ? item.trackTimeMillis / 1000 : 0,
+                                    coverPath: item.artworkUrl600 || selectedPodcast.artworkUrl600 || selectedPodcast.artworkUrl100,
+                                    kind: "podcast",
+                                    filePath: item.episodeUrl
+                                  }));
+                                  const clickedTrack = trackList[idx] || {
+                                    id: `podcast-ep-${ep.trackId || ep.collectionId}-${idx}`,
                                     title: ep.trackName,
                                     artist: selectedPodcast.artistName,
                                     album: selectedPodcast.collectionName,
@@ -2029,7 +2151,7 @@ function PodcastsView({
                                     kind: "podcast",
                                     filePath: ep.episodeUrl
                                   };
-                                  playTrack(track);
+                                  playTrack(clickedTrack, trackList);
                                 }
                               }}
                             >
@@ -2040,27 +2162,170 @@ function PodcastsView({
                               )}
                             </button>
                           </div>
-                          
-                          {isExpanded && (
-                            <div className="episode-description">
-                              <p>{ep.description || "暂无单集介绍"}</p>
-                            </div>
-                          )}
                         </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="episodes-empty">暂无可用播放单集</div>
-                )}
-              </div>
-            </motion.div>
+                        
+                        <AnimatePresence>
+                          {isExpanded && (
+                            <motion.div 
+                              className="episode-description"
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              exit={{ height: 0, opacity: 0 }}
+                              transition={{ duration: 0.2 }}
+                              style={{ overflow: "hidden" }}
+                            >
+                              <div 
+                                style={{ padding: "12px 0 4px 0" }}
+                                dangerouslySetInnerHTML={{ __html: ep.description || "暂无单集介绍" }}
+                              />
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="episodes-empty">暂无可用播放单集</div>
+              )}
+            </div>
           </div>
-        )}
-      </AnimatePresence>
+        </div>
+      ) : (
+        <>
+          <section className="podcast-hero">
+            <div className="podcast-hero-content">
+              <span className="podcast-badge">
+                <Sparkles size={13} />
+                AI 智能推荐
+              </span>
+              <h1>播客书窗</h1>
+              <p className="podcast-desc">将好书的声音带进耳朵。根据您的书架内容智能定制推荐。</p>
+              
+              <div className="podcast-sources">
+                <span className="source-label">推荐源自您正在看的书：</span>
+                <div className="source-chips">
+                  {recommendedByBooks.length > 0 ? (
+                    recommendedByBooks.map((b) => (
+                      <span className="source-chip" key={b.id}>
+                        📖 {b.title}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="source-chip popular">🔥 当前最热门播客</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div className="podcast-section">
+            <h2 className="podcast-section-title">智能推荐节目</h2>
+            {loading ? (
+              <div className="podcast-loading">
+                <RefreshCw size={24} className="spin" />
+                <span>正在搜寻与书籍相关的电台...</span>
+              </div>
+            ) : podcasts.length > 0 ? (
+              <div className="podcast-recommendation-row">
+                {podcasts.map((p) => (
+                  <div className="podcast-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
+                    <div 
+                      className="podcast-card-cover"
+                      style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
+                    />
+                    <div className="podcast-card-body">
+                      <span className="podcast-card-genre">{p.primaryGenreName || "播客"}</span>
+                      <h3 className="podcast-card-title" title={p.collectionName}>{p.collectionName}</h3>
+                      <p className="podcast-card-artist" title={p.artistName}>{p.artistName}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="podcast-empty">暂无推荐节目</div>
+            )}
+          </div>
+
+          <div className="podcast-section">
+            <h2 className="podcast-section-title">
+              伴读音乐 & 沉浸白噪音
+              <span className="podcast-badge-bgm" style={{ 
+                background: 'linear-gradient(135deg, hsl(270, 50%, 12%) 0%, hsl(280, 45%, 8%) 100%)',
+                border: '1px solid rgba(168, 85, 247, 0.35)',
+                color: 'hsl(270, 80%, 75%)',
+                fontSize: '10px',
+                padding: '3px 9px',
+                borderRadius: '99px',
+                fontWeight: 700,
+                marginLeft: '10px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                verticalAlign: 'middle'
+              }}>
+                🎧 适合专注伴读
+              </span>
+            </h2>
+            {loading ? (
+              <div className="podcast-loading">
+                <RefreshCw size={24} className="spin" />
+                <span>搜寻专注伴读背景音乐中...</span>
+              </div>
+            ) : bgmPodcasts.length > 0 ? (
+              <div className="podcast-recommendation-row">
+                {bgmPodcasts.map((p) => (
+                  <div className="podcast-card bgm-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
+                    <div 
+                      className="podcast-card-cover"
+                      style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
+                    />
+                    <div className="podcast-card-body">
+                      <span className="podcast-card-genre bgm-genre">{p.primaryGenreName || "背景音乐"}</span>
+                      <h3 className="podcast-card-title" title={p.collectionName}>{p.collectionName}</h3>
+                      <p className="podcast-card-artist" title={p.artistName}>{p.artistName}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="podcast-empty">暂无伴读背景音乐</div>
+            )}
+          </div>
+
+          <div className="podcast-section">
+            <h2 className="podcast-section-title">热门电台排行榜</h2>
+            {loading ? (
+              <div className="podcast-loading">
+                <RefreshCw size={24} className="spin" />
+                <span>加载热门电台中...</span>
+              </div>
+            ) : popularPodcasts.length > 0 ? (
+              <div className="podcast-grid">
+                {popularPodcasts.map((p) => (
+                  <div className="podcast-card" key={p.collectionId} onClick={() => setSelectedPodcast(p)}>
+                    <div 
+                      className="podcast-card-cover"
+                      style={{ backgroundImage: coverBackground(p.artworkUrl600 || p.artworkUrl100) }}
+                    />
+                    <div className="podcast-card-body">
+                      <span className="podcast-card-genre">{p.primaryGenreName || "播客"}</span>
+                      <h3 className="podcast-card-title" title={p.collectionName}>{p.collectionName}</h3>
+                      <p className="podcast-card-artist" title={p.artistName}>{p.artistName}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="podcast-empty">暂无热门电台</div>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
+
 
 function AudioView({
   kind,
@@ -2072,7 +2337,7 @@ function AudioView({
 }: {
   kind: "music" | "podcasts";
   tracks: AudioTrack[];
-  playTrack: (track: AudioTrack) => void;
+  playTrack: (track: AudioTrack, customQueue?: AudioTrack[]) => void;
   currentTrack: AudioTrack | null;
   isPlaying: boolean;
   onTogglePlay: () => void;
@@ -2163,7 +2428,7 @@ function TrackList({
   large = false
 }: {
   tracks: AudioTrack[];
-  playTrack: (track: AudioTrack) => void;
+  playTrack: (track: AudioTrack, customQueue?: AudioTrack[]) => void;
   currentTrackId?: string;
   isPlaying?: boolean;
   large?: boolean;
@@ -3031,43 +3296,7 @@ function UserModal({
     </div>
   );
 }
-function SyncConfirmationModal({
-  onConfirm,
-  onDecline
-}: {
-  onConfirm: () => void;
-  onDecline: () => void;
-}) {
-  return (
-    <div className="user-modal-overlay" style={{ zIndex: 1000 }}>
-      <motion.div
-        className="user-modal-card"
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        transition={{ duration: 0.24 }}
-        style={{ maxWidth: "400px", textAlign: "center", padding: "24px" }}
-      >
-        <div className="user-modal-header" style={{ justifyContent: "center", marginBottom: "16px", borderBottom: "none", paddingBottom: 0 }}>
-          <h2 style={{ fontSize: "20px", fontWeight: "bold" }}>同步播放提示</h2>
-        </div>
-        <div className="user-modal-body" style={{ display: "flex", flexDirection: "column", gap: "20px", padding: 0 }}>
-          <p style={{ fontSize: "15px", lineHeight: "1.6", color: "var(--text-color)" }}>
-            检测到其他终端正在播放，是否加入同步播放？
-          </p>
-          <div style={{ display: "flex", gap: "12px", justifyContent: "center", marginTop: "8px" }}>
-            <button className="ghost-action" onClick={onDecline} style={{ flex: 1, padding: "10px" }}>
-              独立播放
-            </button>
-            <button className="primary-action" onClick={onConfirm} style={{ flex: 1, padding: "10px" }}>
-              加入同步
-            </button>
-          </div>
-        </div>
-      </motion.div>
-    </div>
-  );
-}
+
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
