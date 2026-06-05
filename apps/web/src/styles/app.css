@@ -892,7 +892,7 @@ h2 {
 .reader-command-bar {
   min-height: 48px;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto auto auto auto;
   align-items: center;
   gap: 6px;
   padding: 5px max(14px, env(safe-area-inset-right)) 5px max(14px, env(safe-area-inset-left));
@@ -3334,3 +3334,527 @@ h2 {
   background: linear-gradient(180deg, rgba(30, 30, 30, 0.4) 0%, rgba(168, 85, 247, 0.03) 100%);
   border-color: rgba(168, 85, 247, 0.22);
 }
+
+/* ==========================================================================
+   Text Selection Toolbar & Highlight Annotation Styling
+   ========================================================================== */
+
+/* Floating Selection Toolbar */
+.selection-toolbar {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 20px;
+  box-shadow: 
+    0 10px 30px -10px rgba(15, 23, 42, 0.25),
+    0 1px 2px rgba(15, 23, 42, 0.05);
+  padding: 6px 8px;
+  transition: opacity 0.2s, transform 0.2s;
+  pointer-events: auto;
+}
+
+.selection-toolbar-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+}
+
+.color-selectors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+}
+
+.color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  padding: 0;
+}
+
+.color-dot:hover {
+  transform: scale(1.22);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.15);
+}
+
+.color-dot.active {
+  border-color: var(--text, #0f172a);
+  transform: scale(1.1);
+}
+
+.toolbar-separator {
+  width: 1px;
+  height: 16px;
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.toolbar-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text, #0f172a);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+
+.toolbar-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--accent);
+}
+
+.toolbar-btn.close-btn {
+  color: var(--muted, #64748b);
+  padding: 4px;
+}
+
+.selection-toolbar-arrow {
+  position: absolute;
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 12px;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.88);
+  border-right: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  z-index: -1;
+}
+
+/* Floating Highlight Popover Editor */
+.highlight-popover {
+  width: 280px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 16px;
+  box-shadow: 
+    0 15px 35px -10px rgba(15, 23, 42, 0.3),
+    0 4px 12px rgba(15, 23, 42, 0.08);
+  padding: 14px;
+  pointer-events: auto;
+}
+
+.highlight-popover-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.highlight-popover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.quote-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.highlight-popover-header .close-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 4px;
+}
+
+.highlight-popover-header .close-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.highlight-quote {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: rgba(15, 23, 42, 0.03);
+  border-left: 3px solid var(--accent);
+  padding: 6px 10px;
+  margin: 0;
+  border-radius: 0 6px 6px 0;
+  max-height: 72px;
+  overflow-y: auto;
+  font-style: italic;
+}
+
+.note-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.note-section label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.note-textarea {
+  width: 100%;
+  height: 64px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 8px;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  background: rgba(255, 255, 255, 0.6);
+  resize: none;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.note-textarea:focus {
+  border-color: var(--accent);
+  background: #fff;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.popover-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.color-dots-row {
+  display: flex;
+  gap: 6px;
+}
+
+.popover-footer .delete-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--rose, #f43f5e);
+  background: rgba(244, 63, 94, 0.08);
+  border: 1px solid rgba(244, 63, 94, 0.15);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.popover-footer .delete-btn:hover {
+  background: var(--rose, #f43f5e);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(244, 63, 94, 0.25);
+}
+
+.popover-footer .save-btn {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.popover-footer .save-btn:hover {
+  background: var(--accent-hover);
+}
+
+.highlight-popover-arrow {
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 12px;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.94);
+  border-left: 1px solid rgba(15, 23, 42, 0.08);
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  z-index: -1;
+}
+
+/* Sidebar Drawer Bookmark List Customizations for Highlights */
+.note-card.highlight-card {
+  position: relative;
+  border: 1px solid rgba(15, 23, 42, 0.05) !important;
+  background: rgba(15, 23, 42, 0.02) !important;
+  padding-left: 16px !important;
+  margin-bottom: 8px;
+}
+
+.note-card.highlight-card:hover {
+  background: rgba(15, 23, 42, 0.04) !important;
+  border-color: var(--accent) !important;
+}
+
+.highlight-indicator-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 4px;
+  border-radius: 4px 0 0 4px;
+}
+
+.card-highlight-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  font-style: italic;
+  margin: 0 0 6px 0;
+  padding: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: left;
+}
+
+.card-note-text {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  text-align: left;
+  border-top: 1px dashed rgba(15, 23, 42, 0.08);
+  padding-top: 4px;
+}
+
+/* Quick Review Drawer Styling */
+.review-search-box {
+  margin-bottom: 16px;
+}
+
+.search-input-wrapper {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  background: #f1f5f9;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  padding: 4px;
+}
+
+.search-input-wrapper input {
+  border: none;
+  background: transparent;
+  padding: 6px 8px;
+  font-size: 13px;
+  outline: none;
+  width: 100%;
+}
+
+.search-input-wrapper .search-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.search-input-wrapper .search-btn:hover {
+  background: var(--accent-hover);
+}
+
+.review-status-msg {
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 20px 0;
+}
+
+.review-status-msg.error {
+  color: var(--rose);
+}
+
+.review-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-result-card {
+  border: 1px solid rgba(15, 23, 42, 0.06);
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  text-align: left;
+}
+
+.review-result-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.05);
+}
+
+.result-card-header {
+  display: flex;
+  margin-bottom: 8px;
+}
+
+.chapter-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 2px 6px;
+  border-radius: 99px;
+}
+
+.result-snippet {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  margin: 0;
+}
+
+.review-highlight {
+  background: #fef08a;
+  color: #854d0e;
+  font-weight: bold;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+/* Night Mode Colors adjustments */
+.app-shell[data-theme="night"] .selection-toolbar {
+  background: rgba(30, 30, 30, 0.88);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 
+    0 10px 30px -10px rgba(0, 0, 0, 0.6),
+    0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+.app-shell[data-theme="night"] .selection-toolbar-arrow {
+  background: rgba(30, 30, 30, 0.88);
+  border-right-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .toolbar-btn {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.app-shell[data-theme="night"] .toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .toolbar-separator {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.app-shell[data-theme="night"] .highlight-popover {
+  background: rgba(30, 30, 30, 0.94);
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 
+    0 15px 35px -10px rgba(0, 0, 0, 0.7),
+    0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.app-shell[data-theme="night"] .highlight-popover-arrow {
+  background: rgba(30, 30, 30, 0.94);
+  border-left-color: rgba(255, 255, 255, 0.08);
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .highlight-quote {
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.app-shell[data-theme="night"] .note-textarea {
+  background: rgba(30, 30, 30, 0.6);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.app-shell[data-theme="night"] .note-card.highlight-card {
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+
+.app-shell[data-theme="night"] .card-highlight-text {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.app-shell[data-theme="night"] .search-input-wrapper {
+  background: #1e293b;
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .search-input-wrapper input {
+  color: #fff;
+}
+
+.app-shell[data-theme="night"] .review-result-card {
+  background: #1e293b;
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.app-shell[data-theme="night"] .review-result-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.app-shell[data-theme="night"] .review-highlight {
+  background: #ca8a04;
+  color: #fef08a;
+}
+
+/* Reader Drawer Close Button Styles */
+.reader-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.reader-drawer-header .section-title {
+  flex: 1;
+  margin-bottom: 0;
+}
+
+.drawer-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.drawer-close-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.app-shell[data-theme="night"] .drawer-close-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+

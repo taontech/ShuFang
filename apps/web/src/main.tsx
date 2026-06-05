@@ -36,7 +36,10 @@ import {
   X,
   Menu,
   Network,
-  Radio
+  Radio,
+  Search,
+  Copy,
+  Edit3
 } from "lucide-react";
 
 import { AnimatePresence, motion } from "framer-motion";
@@ -1162,7 +1165,7 @@ function ReaderView({
   const currentCfiRef = useRef(book.cfi ?? "");
   const locationsReadyRef = useRef(false);
   const [toc, setToc] = useState<NavItem[]>([]);
-  const [drawer, setDrawer] = useState<"toc" | "bookmarks" | null>(null);
+  const [drawer, setDrawer] = useState<"toc" | "bookmarks" | "review" | null>(null);
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
   const [progress, setProgress] = useState(Math.round(book.progress));
   const [chapterTitle, setChapterTitle] = useState(book.chapterTitle ?? "");
@@ -1171,6 +1174,27 @@ function ReaderView({
   const [readerError, setReaderError] = useState("");
   const [fontSize, setFontSize] = useState(() => readReaderFontSize());
   const isPdf = book.format === "pdf";
+
+  const [selectionMenu, setSelectionMenu] = useState<{
+    cfiRange: string;
+    text: string;
+    top: number;
+    left: number;
+    width: number;
+    height: number;
+    contents: any;
+  } | null>(null);
+
+  const [selectedHighlight, setSelectedHighlight] = useState<{
+    bookmark: BookmarkItem;
+    top: number;
+    left: number;
+  } | null>(null);
+
+  const [reviewQuery, setReviewQuery] = useState("");
+  const [reviewResults, setReviewResults] = useState<Array<{ chapterTitle: string; href: string; context: string }>>([]);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState("");
 
   const turnPage = (direction: "previous" | "next") => {
     void (direction === "next" ? renditionRef.current?.next() : renditionRef.current?.prev());
@@ -1247,19 +1271,93 @@ function ReaderView({
         height: "100%",
         spread: readerSpreadForElement(hostRef.current),
         minSpreadWidth: 860,
-        flow: "paginated"
-      });
+        flow: "paginated",
+        allowScriptedContent: true
+      } as any);
       renditionRef.current = rendition;
       applyReaderTheme(rendition, theme, fontSize);
-      rendition.hooks.content.register((contents: { document: Document }) => {
+      rendition.hooks.content.register((contents: any) => {
         contents.document.addEventListener("wheel", handleHorizontalWheel, { passive: false });
-        contents.document.addEventListener("touchstart", (event) => {
+        contents.document.addEventListener("touchstart", (event: any) => {
           const touch = event.touches[0];
           if (touch) startTouch(touch.clientX, touch.clientY);
         });
-        contents.document.addEventListener("touchend", (event) => {
+        contents.document.addEventListener("touchend", (event: any) => {
           const touch = event.changedTouches[0];
           if (touch) endTouch(touch.clientX, touch.clientY);
+        });
+
+        // Direct selection check on mouseup
+        contents.document.addEventListener("mouseup", () => {
+          const win = contents.document.defaultView;
+          if (!win) return;
+          const selection = win.getSelection();
+          const text = selection?.toString().trim();
+          if (selection && text && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            const rect = range.getBoundingClientRect();
+            const iframe = hostRef.current?.querySelector("iframe");
+            if (!iframe) return;
+            const iframeRect = iframe.getBoundingClientRect();
+
+            const top = rect.top + iframeRect.top;
+            const left = rect.left + iframeRect.left;
+            const width = rect.width;
+            const height = rect.height;
+            const cfiRange = contents.cfiFromRange(range);
+
+            setSelectionMenu({
+              cfiRange,
+              text,
+              top,
+              left,
+              width,
+              height,
+              contents
+            });
+          }
+        });
+
+        // Direct selection check on touchend (mobile selection)
+        contents.document.addEventListener("touchend", () => {
+          setTimeout(() => {
+            const win = contents.document.defaultView;
+            if (!win) return;
+            const selection = win.getSelection();
+            const text = selection?.toString().trim();
+            if (selection && text && selection.rangeCount > 0) {
+              const range = selection.getRangeAt(0);
+              const rect = range.getBoundingClientRect();
+              const iframe = hostRef.current?.querySelector("iframe");
+              if (!iframe) return;
+              const iframeRect = iframe.getBoundingClientRect();
+
+              const top = rect.top + iframeRect.top;
+              const left = rect.left + iframeRect.left;
+              const width = rect.width;
+              const height = rect.height;
+              const cfiRange = contents.cfiFromRange(range);
+
+              setSelectionMenu({
+                cfiRange,
+                text,
+                top,
+                left,
+                width,
+                height,
+                contents
+              });
+            }
+          }, 150);
+        });
+
+        // Click on iframe document to dismiss popovers only if selection is empty
+        contents.document.addEventListener("click", () => {
+          const selection = contents.document.defaultView?.getSelection();
+          if (!selection || !selection.toString().trim()) {
+            setSelectionMenu(null);
+            setSelectedHighlight(null);
+          }
         });
       });
 
@@ -1331,6 +1429,66 @@ function ReaderView({
     window.localStorage.setItem("shufang.readerFontSize", String(fontSize));
   }, [theme, fontSize]);
 
+  // Load and apply highlights in rendition
+  useEffect(() => {
+    const rendition = renditionRef.current;
+    if (!rendition || !isReaderReady || isPdf) return;
+
+    // Remove existing highlight annotations to avoid duplicates
+    bookmarks.forEach((bm) => {
+      if (bm.cfi) {
+        try {
+          rendition.annotations.remove(bm.cfi, "highlight");
+        } catch (e) {}
+      }
+    });
+
+    // Add current highlights
+    bookmarks.forEach((bm) => {
+      if (bm.cfi && bm.cfi.includes(",")) {
+        try {
+          rendition.annotations.add(
+            "highlight",
+            bm.cfi,
+            { id: bm.id },
+            (e: MouseEvent) => {
+              const iframe = hostRef.current?.querySelector("iframe");
+              if (!iframe) return;
+              const iframeRect = iframe.getBoundingClientRect();
+              setSelectedHighlight({
+                bookmark: bm,
+                top: e.clientY + iframeRect.top,
+                left: e.clientX + iframeRect.left
+              });
+            },
+            "epubjs-highlight",
+            {
+              fill: bm.color || "rgba(241, 189, 101, 0.38)",
+              "fill-opacity": "0.38",
+              "mix-blend-mode": "multiply",
+              "cursor": "pointer"
+            }
+          );
+        } catch (err) {
+          console.error("Failed to render highlight:", err);
+        }
+      }
+    });
+  }, [bookmarks, isReaderReady, isPdf]);
+
+  // Handle global clicks on the parent page to close floating menus
+  useEffect(() => {
+    const handleGlobalClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".selection-toolbar") && !target.closest(".highlight-popover")) {
+        setSelectionMenu(null);
+        setSelectedHighlight(null);
+      }
+    };
+    document.addEventListener("click", handleGlobalClick);
+    return () => document.removeEventListener("click", handleGlobalClick);
+  }, []);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -1400,6 +1558,39 @@ function ReaderView({
     setDrawer("bookmarks");
   };
 
+  const handleReviewSearch = async () => {
+    const q = reviewQuery.trim();
+    if (!q) return;
+    setReviewLoading(true);
+    setReviewError("");
+    setReviewResults([]);
+    try {
+      const currentCfi = currentCfiRef.current || "";
+      const results = await api<Array<{ chapterTitle: string; href: string; context: string }>>(
+        `/api/books/${book.id}/search-context?query=${encodeURIComponent(q)}&cfi=${encodeURIComponent(currentCfi)}`
+      );
+      setReviewResults(results);
+    } catch (err) {
+      setReviewError("回顾查询失败，请稍后重试。");
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
+  const renderHighlightedContext = (text: string, query: string) => {
+    if (!query) return text;
+    const parts = text.split(new RegExp(`(${query})`, "gi"));
+    return parts.map((part, index) =>
+      part.toLowerCase() === query.toLowerCase() ? (
+        <mark key={index} className="review-highlight">
+          {part}
+        </mark>
+      ) : (
+        part
+      )
+    );
+  };
+
   return (
     <div className="reader-shell">
       <div className="reader-command-bar">
@@ -1418,6 +1609,9 @@ function ReaderView({
         </button>}
         {!isPdf && <button className="icon-button" onClick={() => setDrawer(drawer === "bookmarks" ? null : "bookmarks")} aria-label="书签" title="书签">
           <BookMarked size={18} />
+        </button>}
+        {!isPdf && <button className="icon-button" onClick={() => setDrawer(drawer === "review" ? null : "review")} aria-label="快速回顾" title="快速回顾">
+          <Search size={18} />
         </button>}
         {!isPdf && (
           <div className="font-size-control" aria-label="字号">
@@ -1455,7 +1649,7 @@ function ReaderView({
       >
         <AnimatePresence>
           {drawer === "toc" && (
-            <ReaderDrawer title="目录" icon={<BookOpen size={18} />}>
+            <ReaderDrawer title="目录" icon={<BookOpen size={18} />} onClose={() => setDrawer(null)}>
               {toc.map((item) => (
                 <button
                   className="toc-item"
@@ -1471,26 +1665,91 @@ function ReaderView({
             </ReaderDrawer>
           )}
           {drawer === "bookmarks" && (
-            <ReaderDrawer title="我的书签" icon={<Bookmark size={18} />}>
+            <ReaderDrawer title="我的书签" icon={<Bookmark size={18} />} onClose={() => setDrawer(null)}>
               <div className="bookmark-editor">
                 <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="备注这一页" />
                 <button className="primary-action compact" onClick={addBookmark}>
                   添加
                 </button>
               </div>
-              {bookmarks.map((item) => (
-                <button
-                  className="note-card"
-                  key={item.id}
-                  onClick={() => {
-                    void renditionRef.current?.display(item.cfi);
-                    setDrawer(null);
-                  }}
-                >
-                  <strong>{item.title ?? "书签"}</strong>
-                  <span>{item.note ?? "无备注"}</span>
-                </button>
-              ))}
+              {bookmarks.map((item) => {
+                const isHighlight = item.cfi && item.cfi.includes(",");
+                return (
+                  <button
+                    className={`note-card ${isHighlight ? "highlight-card" : ""}`}
+                    key={item.id}
+                    onClick={() => {
+                      void renditionRef.current?.display(item.cfi);
+                      setDrawer(null);
+                    }}
+                  >
+                    {isHighlight ? (
+                      <>
+                        <div className="highlight-indicator-bar" style={{ backgroundColor: item.color || "rgba(241, 189, 101, 0.38)" }} />
+                        <blockquote className="card-highlight-text">
+                          "{item.title}"
+                        </blockquote>
+                        {item.note && <span className="card-note-text">{item.note}</span>}
+                      </>
+                    ) : (
+                      <>
+                        <strong>{item.title ?? "书签"}</strong>
+                        <span>{item.note ?? "无备注"}</span>
+                      </>
+                    )}
+                  </button>
+                );
+              })}
+            </ReaderDrawer>
+          )}
+          {drawer === "review" && (
+            <ReaderDrawer title="快速回顾" icon={<Search size={18} />} onClose={() => setDrawer(null)}>
+              <div className="review-search-box">
+                <div className="search-input-wrapper">
+                  <input
+                    value={reviewQuery}
+                    onChange={(event) => setReviewQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void handleReviewSearch();
+                      }
+                    }}
+                    placeholder="回忆一个角色/地名..."
+                  />
+                  <button className="search-btn" onClick={handleReviewSearch}>
+                    <Search size={16} />
+                  </button>
+                </div>
+              </div>
+              
+              {reviewLoading && <div className="review-status-msg">正在翻找看过的部分...</div>}
+              {reviewError && <div className="review-status-msg error">{reviewError}</div>}
+              
+              {!reviewLoading && !reviewError && reviewResults.length === 0 && reviewQuery && (
+                <div className="review-status-msg">在看过的部分没有找到该词。</div>
+              )}
+
+              <div className="review-results-list">
+                {reviewResults.map((match, idx) => (
+                  <div
+                    key={idx}
+                    className="review-result-card"
+                    onClick={() => {
+                      if (renditionRef.current) {
+                        void renditionRef.current.display(match.href);
+                        setDrawer(null);
+                      }
+                    }}
+                  >
+                    <div className="result-card-header">
+                      <span className="chapter-badge">{match.chapterTitle}</span>
+                    </div>
+                    <p className="result-snippet">
+                      {renderHighlightedContext(match.context, reviewQuery)}
+                    </p>
+                  </div>
+                ))}
+              </div>
             </ReaderDrawer>
           )}
         </AnimatePresence>
@@ -1508,10 +1767,7 @@ function ReaderView({
           {isPdf ? (
             <PdfReader book={book} user={user} onProgressSaved={onProgressSaved} />
           ) : (
-            <>
-              <div ref={hostRef} className="epub-host" />
-              <div className="reader-gesture-layer" aria-hidden="true" />
-            </>
+            <div ref={hostRef} className="epub-host" />
           )}
         </article>
         {!isPdf && <button className="reader-turn-button previous" onClick={() => turnPage("previous")} aria-label="上一页">
@@ -1527,11 +1783,270 @@ function ReaderView({
           <span style={{ width: `${progress}%` }} />
         </div>
       </div>
+
+      {/* Floating Selection Toolbar */}
+      {selectionMenu && (
+        <div
+          className="selection-toolbar"
+          style={{
+            position: "absolute",
+            top: `${selectionMenu.top - 54}px`,
+            left: `${selectionMenu.left + selectionMenu.width / 2}px`,
+            transform: "translateX(-50%)",
+            zIndex: 1000
+          }}
+        >
+          <div className="selection-toolbar-inner">
+            <div className="color-selectors">
+              {["rgba(241, 189, 101, 0.38)", "#52c41a", "#1890ff", "#ff4d4f"].map((color) => (
+                <button
+                  key={color}
+                  className="color-dot"
+                  style={{ backgroundColor: color }}
+                  onClick={async () => {
+                    await api("/api/bookmarks", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        userId: user.id,
+                        bookId: book.id,
+                        cfi: selectionMenu.cfiRange,
+                        title: selectionMenu.text,
+                        note: null,
+                        color
+                      })
+                    });
+                    selectionMenu.contents.window.getSelection().removeAllRanges();
+                    setSelectionMenu(null);
+                    await loadBookmarks(book.id, user.id, setBookmarks);
+                  }}
+                />
+              ))}
+            </div>
+            <div className="toolbar-separator" />
+            <button
+              className="toolbar-btn"
+              title="写备注"
+              onClick={() => {
+                const tempId = "temp-" + Date.now();
+                setSelectedHighlight({
+                  bookmark: {
+                    id: tempId,
+                    bookId: book.id,
+                    cfi: selectionMenu.cfiRange,
+                    title: selectionMenu.text,
+                    note: "",
+                    color: "rgba(241, 189, 101, 0.38)",
+                    createdAt: new Date().toISOString()
+                  },
+                  top: selectionMenu.top,
+                  left: selectionMenu.left + selectionMenu.width / 2
+                });
+                selectionMenu.contents.window.getSelection().removeAllRanges();
+                setSelectionMenu(null);
+              }}
+            >
+              <Edit3 size={14} />
+              <span>备注</span>
+            </button>
+            <div className="toolbar-separator" />
+            <button
+              className="toolbar-btn"
+              title="回顾"
+              onClick={async () => {
+                setReviewQuery(selectionMenu.text);
+                setDrawer("review");
+                setReviewLoading(true);
+                setReviewError("");
+                setReviewResults([]);
+                try {
+                  const currentCfi = currentCfiRef.current || "";
+                  const results = await api<Array<{ chapterTitle: string; href: string; context: string }>>(
+                    `/api/books/${book.id}/search-context?query=${encodeURIComponent(selectionMenu.text)}&cfi=${encodeURIComponent(currentCfi)}`
+                  );
+                  setReviewResults(results);
+                } catch (err) {
+                  setReviewError("回顾查询失败，请稍后重试。");
+                } finally {
+                  setReviewLoading(false);
+                }
+                selectionMenu.contents.window.getSelection().removeAllRanges();
+                setSelectionMenu(null);
+              }}
+            >
+              <Search size={14} />
+              <span>回顾</span>
+            </button>
+            <div className="toolbar-separator" />
+            <button
+              className="toolbar-btn"
+              title="复制"
+              onClick={() => {
+                navigator.clipboard.writeText(selectionMenu.text);
+                selectionMenu.contents.window.getSelection().removeAllRanges();
+                setSelectionMenu(null);
+              }}
+            >
+              <Copy size={14} />
+              <span>复制</span>
+            </button>
+            <div className="toolbar-separator" />
+            <button
+              className="toolbar-btn close-btn"
+              title="取消"
+              onClick={() => {
+                selectionMenu.contents.window.getSelection().removeAllRanges();
+                setSelectionMenu(null);
+              }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+          <div className="selection-toolbar-arrow" />
+        </div>
+      )}
+
+      {/* Floating Highlight & Annotation Editor */}
+      {selectedHighlight && (
+        <div
+          className="highlight-popover"
+          style={{
+            position: "absolute",
+            top: `${selectedHighlight.top + 24}px`,
+            left: `${selectedHighlight.left}px`,
+            transform: "translateX(-50%)",
+            zIndex: 1000
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="highlight-popover-inner">
+            <div className="highlight-popover-header">
+              <span className="quote-label">选中文本：</span>
+              <button
+                className="close-btn"
+                onClick={() => setSelectedHighlight(null)}
+              >
+                <X size={14} />
+              </button>
+            </div>
+            <blockquote className="highlight-quote">
+              "{selectedHighlight.bookmark.title}"
+            </blockquote>
+            
+            <div className="note-section">
+              <label>备注感悟：</label>
+              <textarea
+                className="note-textarea"
+                defaultValue={selectedHighlight.bookmark.note || ""}
+                placeholder="在此处写下你的备注感悟..."
+                onBlur={async (e) => {
+                  const noteVal = e.target.value.trim();
+                  const isTemp = selectedHighlight.bookmark.id.startsWith("temp-");
+                  
+                  if (isTemp) {
+                    if (noteVal) {
+                      await api("/api/bookmarks", {
+                        method: "POST",
+                        body: JSON.stringify({
+                          userId: user.id,
+                          bookId: book.id,
+                          cfi: selectedHighlight.bookmark.cfi,
+                          title: selectedHighlight.bookmark.title,
+                          note: noteVal,
+                          color: selectedHighlight.bookmark.color
+                        })
+                      });
+                    }
+                  } else {
+                    await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
+                      method: "PUT",
+                      body: JSON.stringify({
+                        note: noteVal || null,
+                        color: selectedHighlight.bookmark.color
+                      })
+                    });
+                  }
+                  await loadBookmarks(book.id, user.id, setBookmarks);
+                }}
+              />
+            </div>
+
+            <div className="popover-footer">
+              <div className="color-dots-row">
+                {["rgba(241, 189, 101, 0.38)", "#52c41a", "#1890ff", "#ff4d4f"].map((color) => (
+                  <button
+                    key={color}
+                    className={`color-dot ${selectedHighlight.bookmark.color === color ? "active" : ""}`}
+                    style={{ backgroundColor: color }}
+                    onClick={async () => {
+                      const isTemp = selectedHighlight.bookmark.id.startsWith("temp-");
+                      if (isTemp) {
+                        setSelectedHighlight({
+                          ...selectedHighlight,
+                          bookmark: {
+                            ...selectedHighlight.bookmark,
+                            color
+                          }
+                        });
+                      } else {
+                        await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
+                          method: "PUT",
+                          body: JSON.stringify({
+                            note: selectedHighlight.bookmark.note,
+                            color
+                          })
+                        });
+                        await loadBookmarks(book.id, user.id, setBookmarks);
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+              
+              {!selectedHighlight.bookmark.id.startsWith("temp-") && (
+                <button
+                  className="delete-btn"
+                  title="删除"
+                  onClick={async () => {
+                    await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
+                      method: "DELETE"
+                    });
+                    setSelectedHighlight(null);
+                    await loadBookmarks(book.id, user.id, setBookmarks);
+                  }}
+                >
+                  <Trash2 size={13} />
+                  <span>删除</span>
+                </button>
+              )}
+              
+              {selectedHighlight.bookmark.id.startsWith("temp-") && (
+                <button
+                  className="save-btn"
+                  onClick={() => setSelectedHighlight(null)}
+                >
+                  完成
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="highlight-popover-arrow" />
+        </div>
+      )}
     </div>
   );
 }
 
-function ReaderDrawer({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) {
+function ReaderDrawer({
+  title,
+  icon,
+  children,
+  onClose
+}: {
+  title: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  onClose?: () => void;
+}) {
   return (
     <motion.aside
       className="reader-drawer"
@@ -1540,7 +2055,14 @@ function ReaderDrawer({ title, icon, children }: { title: string; icon: React.Re
       exit={{ opacity: 0, x: -18 }}
       transition={{ duration: 0.2 }}
     >
-      <SectionTitle icon={icon} title={title} />
+      <div className="reader-drawer-header">
+        <SectionTitle icon={icon} title={title} />
+        {onClose && (
+          <button className="drawer-close-btn" onClick={onClose} aria-label="关闭" title="关闭">
+            <X size={16} />
+          </button>
+        )}
+      </div>
       {children}
     </motion.aside>
   );
@@ -3085,16 +3607,21 @@ function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) 
       background: "#fbf4e9",
       "font-family": "Georgia, 'Songti SC', serif",
       "line-height": "1.72",
-      "font-size": `${fontSize}px`
+      "font-size": `${fontSize}px`,
+      "user-select": "text !important",
+      "-webkit-user-select": "text !important"
     },
     body: {
       margin: "0 !important",
       padding: "0 4% !important"
     },
-    "body *": { color: "#2f2923 !important", "background-color": "transparent !important" },
+    "body *": { color: "#2f2923 !important", "background-color": "transparent !important", "user-select": "text !important", "-webkit-user-select": "text !important" },
     "p, div": { "line-height": "1.72" },
     img: { "max-width": "100% !important", "height": "auto !important" },
-    a: { color: "#2a8278 !important" }
+    a: { color: "#2a8278 !important" },
+    "::selection": {
+      background: "rgba(241, 189, 101, 0.4) !important"
+    }
   });
   rendition.themes.register("shufang-night", {
     "html, body": {
@@ -3102,16 +3629,21 @@ function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) 
       background: "#171615",
       "font-family": "Georgia, 'Songti SC', serif",
       "line-height": "1.72",
-      "font-size": `${fontSize}px`
+      "font-size": `${fontSize}px`,
+      "user-select": "text !important",
+      "-webkit-user-select": "text !important"
     },
     body: {
       margin: "0 !important",
       padding: "0 4% !important"
     },
-    "body *": { color: "#efe3d0 !important", "background-color": "transparent !important" },
+    "body *": { color: "#efe3d0 !important", "background-color": "transparent !important", "user-select": "text !important", "-webkit-user-select": "text !important" },
     "p, div": { "line-height": "1.72" },
     img: { "max-width": "100% !important", "height": "auto !important" },
-    a: { color: "#79d9cb !important" }
+    a: { color: "#79d9cb !important" },
+    "::selection": {
+      background: "rgba(121, 217, 203, 0.4) !important"
+    }
   });
   rendition.themes.select(theme === "day" ? "shufang-day" : "shufang-night");
 }

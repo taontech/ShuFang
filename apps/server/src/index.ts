@@ -5,9 +5,26 @@ import fastifyWebsocket from "@fastify/websocket";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname, join, dirname } from "node:path";
 import { openDatabase } from "./database.js";
 import { addScanRoot, scanLibrary } from "./scanner.js";
+import JSZip from "jszip";
+import { XMLParser } from "fast-xml-parser";
+
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "@_",
+  textNodeName: "#text"
+});
+
+function first<T>(value: T | T[] | undefined): T | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function arrayOf<T>(value: T | T[] | undefined): T[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
 
 const port = Number(process.env.PORT ?? 4141);
 const host = process.env.HOST ?? "0.0.0.0";
@@ -375,6 +392,160 @@ app.delete<{ Params: { bookmarkId: string } }>("/api/bookmarks/:bookmarkId", asy
   db.prepare("DELETE FROM bookmarks WHERE id = ?").run(request.params.bookmarkId);
   return { ok: true };
 });
+
+app.put<{
+  Params: { bookmarkId: string };
+  Body: { note?: string; color?: string };
+}>("/api/bookmarks/:bookmarkId", async (request) => {
+  const { bookmarkId } = request.params;
+  const { note, color } = request.body;
+  db.prepare("UPDATE bookmarks SET note = ?, color = ? WHERE id = ?").run(note ?? null, color ?? null, bookmarkId);
+  return { ok: true };
+});
+
+app.get<{
+  Params: { bookId: string };
+  Querystring: { query: string; cfi: string; userId?: string };
+}>("/api/books/:bookId/search-context", async (request, reply) => {
+  const { bookId } = request.params;
+  const { query, cfi } = request.query;
+
+  if (!query) return reply.code(400).send({ error: "query_required" });
+
+  const book = db.prepare("SELECT file_path AS filePath, file_type AS format FROM books WHERE id = ?").get(bookId) as
+    | { filePath: string; format: string }
+    | undefined;
+  if (!book) return reply.code(404).send({ error: "book_not_found" });
+
+  if (book.format !== "epub") {
+    return [];
+  }
+
+  // 1. Open the EPUB file
+  const zip = await JSZip.loadAsync(await readFile(book.filePath));
+
+  // 2. Parse OPF container
+  const containerFile = zip.file("META-INF/container.xml");
+  if (!containerFile) throw new Error("EPUB missing container.xml");
+  const container = parser.parse(await containerFile.async("text"));
+  const rootfile = first(container?.container?.rootfiles?.rootfile);
+  const opfPath = rootfile?.["@_full-path"];
+  if (!opfPath || !zip.file(opfPath)) throw new Error("EPUB missing OPF metadata");
+
+  const opf = parser.parse(await zip.file(opfPath)!.async("text"));
+  const manifest = arrayOf(opf?.package?.manifest?.item);
+  const manifestMap = new Map();
+  for (const item of manifest) {
+    manifestMap.set(item["@_id"], item["@_href"]);
+  }
+  const spine = arrayOf(opf?.package?.spine?.itemref).map((item) => {
+    const idref = item["@_idref"];
+    const href = manifestMap.get(idref);
+    return { idref, href };
+  });
+
+  // 3. Determine current spine index
+  let currentSpineIndex = spine.length - 1;
+  if (cfi) {
+    const idrefMatch = cfi.match(/\[([^\]]+)\]/);
+    if (idrefMatch) {
+      const idref = idrefMatch[1];
+      const idx = spine.findIndex((item) => item.idref === idref);
+      if (idx !== -1) currentSpineIndex = idx;
+    } else {
+      const spineIndexMatch = cfi.match(/\/6\/(\d+)/);
+      if (spineIndexMatch) {
+        const val = parseInt(spineIndexMatch[1], 10);
+        currentSpineIndex = Math.floor(val / 2) - 1;
+      }
+    }
+  }
+
+  currentSpineIndex = Math.max(0, Math.min(currentSpineIndex, spine.length - 1));
+
+  // 4. Reverse search from currentSpineIndex down to 0
+  const results = [];
+  const queryLower = query.toLowerCase();
+
+  for (let i = currentSpineIndex; i >= 0; i--) {
+    const item = spine[i];
+    if (!item.href) continue;
+
+    const fileZipPath = join(dirname(opfPath), item.href).replaceAll("\\", "/");
+    const file = zip.file(fileZipPath);
+    if (!file) continue;
+
+    const html = await file.async("text");
+
+    // Parse chapter title
+    let chapterTitle = "";
+    const hMatch = html.match(/<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i);
+    if (hMatch) {
+      chapterTitle = hMatch[1].replace(/<[^>]+>/g, "").trim();
+    } else {
+      const titleMatch = html.match(/<title>([\s\S]*?)<\/title>/i);
+      if (titleMatch) chapterTitle = titleMatch[1].trim();
+    }
+
+    // Strip HTML to plain text
+    let text = html;
+    text = text.replace(/<head[\s\S]*?<\/head>/gi, "");
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, "");
+    text = text.replace(/<style[\s\S]*?<\/style>/gi, "");
+    text = text.replace(/<\/(p|div|h1|h2|h3|h4|h5|h6|li|tr)>/gi, "\n");
+    text = text.replace(/<br\s*\/?>/gi, "\n");
+    text = text.replace(/<[^>]+>/g, "");
+    text = text.replace(/&nbsp;/g, " ")
+               .replace(/&lt;/g, "<")
+               .replace(/&gt;/g, ">")
+               .replace(/&amp;/g, "&")
+               .replace(/&quot;/g, '"')
+               .replace(/&apos;/g, "'");
+
+    // Replace multiple spaces with a single space
+    text = text.replace(/\s+/g, " ");
+
+    let index = text.toLowerCase().lastIndexOf(queryLower);
+    const chapterMatches = [];
+
+    while (index !== -1) {
+      const start = Math.max(0, index - 30);
+      const end = Math.min(text.length, index + query.length + 70);
+      const snippet = text.slice(start, end);
+
+      chapterMatches.push({
+        chapterTitle: chapterTitle || `第 ${i + 1} 章节`,
+        href: item.href,
+        context: snippet,
+        index
+      });
+
+      if (index === 0) break;
+      index = text.toLowerCase().lastIndexOf(queryLower, index - 1);
+    }
+
+    chapterMatches.sort((a, b) => b.index - a.index);
+
+    for (const match of chapterMatches) {
+      results.push({
+        chapterTitle: match.chapterTitle,
+        href: match.href,
+        context: match.context
+      });
+
+      if (results.length >= 10) {
+        break;
+      }
+    }
+
+    if (results.length >= 10) {
+      break;
+    }
+  }
+
+  return results;
+});
+
 
 app.get<{ Querystring: { kind?: "music" | "podcast" } }>("/api/audio", async (request) => {
   const kind = request.query.kind ?? "music";
