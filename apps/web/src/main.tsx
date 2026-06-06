@@ -1182,6 +1182,8 @@ function ReaderView({
     text: string;
     top: number;
     left: number;
+    right: number;
+    bottom: number;
     width: number;
     height: number;
     contents: any;
@@ -1198,6 +1200,8 @@ function ReaderView({
     text: string;
     top: number;
     left: number;
+    right?: number;
+    bottom?: number;
   } | null>(null);
 
   const [userNotePopover, setUserNotePopover] = useState<{
@@ -1308,10 +1312,9 @@ function ReaderView({
 
             const footnote = await readEpubFootnote(epubBook, contents.document, link.getAttribute("href") ?? "");
             if (!footnote) return;
-            const iframe = hostRef.current?.querySelector("iframe");
-            if (!iframe) return;
             const linkRect = link.getBoundingClientRect();
-            const iframeRect = iframe.getBoundingClientRect();
+            const iframeRect = contents.document.defaultView?.frameElement?.getBoundingClientRect();
+            if (!iframeRect) return;
 
             setSelectionMenu(null);
             setSelectedHighlight(null);
@@ -1319,8 +1322,10 @@ function ReaderView({
             setFootnotePopover({
               title: footnote.title,
               text: footnote.text,
-              top: linkRect.bottom + iframeRect.top,
-              left: linkRect.left + linkRect.width / 2 + iframeRect.left
+              top: linkRect.top + iframeRect.top,
+              left: linkRect.left + iframeRect.left,
+              right: linkRect.right + iframeRect.left,
+              bottom: linkRect.bottom + iframeRect.top
             });
           },
           true
@@ -1336,31 +1341,20 @@ function ReaderView({
         });
 
         // Direct selection check on mouseup
-        contents.document.addEventListener("mouseup", () => {
+        contents.document.addEventListener("mouseup", (event: MouseEvent) => {
           const win = contents.document.defaultView;
           if (!win) return;
           const selection = win.getSelection();
           const text = selection?.toString().trim();
           if (selection && text && selection.rangeCount > 0) {
             const range = selection.getRangeAt(0);
-            const rect = range.getBoundingClientRect();
-            const iframe = hostRef.current?.querySelector("iframe");
-            if (!iframe) return;
-            const iframeRect = iframe.getBoundingClientRect();
-
-            const top = rect.top + iframeRect.top;
-            const left = rect.left + iframeRect.left;
-            const width = rect.width;
-            const height = rect.height;
+            const anchor = getRangeAnchor(range, event);
             const cfiRange = contents.cfiFromRange(range);
 
             setSelectionMenu({
               cfiRange,
               text,
-              top,
-              left,
-              width,
-              height,
+              ...anchor,
               contents
             });
           }
@@ -1375,24 +1369,13 @@ function ReaderView({
             const text = selection?.toString().trim();
             if (selection && text && selection.rangeCount > 0) {
               const range = selection.getRangeAt(0);
-              const rect = range.getBoundingClientRect();
-              const iframe = hostRef.current?.querySelector("iframe");
-              if (!iframe) return;
-              const iframeRect = iframe.getBoundingClientRect();
-
-              const top = rect.top + iframeRect.top;
-              const left = rect.left + iframeRect.left;
-              const width = rect.width;
-              const height = rect.height;
+              const anchor = getRangeAnchor(range);
               const cfiRange = contents.cfiFromRange(range);
 
               setSelectionMenu({
                 cfiRange,
                 text,
-                top,
-                left,
-                width,
-                height,
+                ...anchor,
                 contents
               });
             }
@@ -1852,15 +1835,11 @@ function ReaderView({
 
       {/* Floating Selection Toolbar */}
       {selectionMenu && (
-        <div
+        <ReaderPopover
+          anchor={selectionMenu}
+          boundaryRef={workspaceRef}
           className="selection-toolbar"
-          style={{
-            position: "absolute",
-            top: `${selectionMenu.top - 54}px`,
-            left: `${selectionMenu.left + selectionMenu.width / 2}px`,
-            transform: "translateX(-50%)",
-            zIndex: 1000
-          }}
+          arrowClassName="selection-toolbar-arrow"
         >
           <div className="selection-toolbar-inner">
             <div className="color-selectors">
@@ -1904,8 +1883,8 @@ function ReaderView({
                     color: "rgba(241, 189, 101, 0.38)",
                     createdAt: new Date().toISOString()
                   },
-                  top: selectionMenu.top,
-                  left: selectionMenu.left + selectionMenu.width / 2
+                  top: (selectionMenu.top + selectionMenu.bottom) / 2,
+                  left: (selectionMenu.left + selectionMenu.right) / 2
                 });
                 selectionMenu.contents.window.getSelection().removeAllRanges();
                 setSelectionMenu(null);
@@ -1967,8 +1946,7 @@ function ReaderView({
               <X size={14} />
             </button>
           </div>
-          <div className="selection-toolbar-arrow" />
-        </div>
+        </ReaderPopover>
       )}
 
       {/* Floating Highlight & Annotation Editor */}
@@ -2145,14 +2123,20 @@ function ReaderPopover({
   arrowClassName = "footnote-popover-arrow",
   children
 }: {
-  anchor: { top: number; left: number };
+  anchor: { top: number; left: number; right?: number; bottom?: number };
   boundaryRef: React.RefObject<HTMLElement>;
   className: string;
   arrowClassName?: string;
   children: React.ReactNode;
 }) {
   const popoverRef = useRef<HTMLDivElement | null>(null);
-  const [position, setPosition] = useState<{ top: number; left: number; arrowLeft: number; placement: "above" | "below" } | null>(null);
+  const [position, setPosition] = useState<{
+    top: number;
+    left: number;
+    arrowLeft: number;
+    arrowTop: number;
+    placement: "above" | "below" | "left" | "right";
+  } | null>(null);
 
   useEffect(() => {
     const updatePosition = () => {
@@ -2168,17 +2152,57 @@ function ReaderPopover({
       const height = popover.offsetHeight;
       const safe = 12;
       const gap = 10;
+      const anchorRight = anchor.right ?? anchor.left;
+      const anchorBottom = anchor.bottom ?? anchor.top;
+      const anchorCenterX = (anchor.left + anchorRight) / 2;
+      const anchorCenterY = (anchor.top + anchorBottom) / 2;
+      const spaces = {
+        above: anchor.top - boundary.top - safe,
+        below: boundary.bottom - anchorBottom - safe,
+        left: anchor.left - boundary.left - safe,
+        right: boundary.right - anchorRight - safe
+      };
+      const fits = {
+        above: spaces.above >= height + gap,
+        below: spaces.below >= height + gap,
+        left: spaces.left >= width + gap,
+        right: spaces.right >= width + gap
+      };
+      const boundaryWidth = boundary.right - boundary.left;
+      const spreadMiddle = boundary.left + boundaryWidth / 2;
+      const pageLeft = boundaryWidth >= 980 && anchorCenterX >= spreadMiddle ? spreadMiddle : boundary.left;
+      const pageRight = boundaryWidth >= 980 && anchorCenterX < spreadMiddle ? spreadMiddle : boundary.right;
+      const nearLeftEdge = anchorCenterX - pageLeft < width / 2 + safe;
+      const nearRightEdge = pageRight - anchorCenterX < width / 2 + safe;
+      let placement: "above" | "below" | "left" | "right";
+      if (nearLeftEdge && fits.right) placement = "right";
+      else if (nearRightEdge && fits.left) placement = "left";
+      else if (fits.below) placement = "below";
+      else if (fits.above) placement = "above";
+      else if (fits.right) placement = "right";
+      else if (fits.left) placement = "left";
+      else {
+        placement = (Object.entries(spaces) as Array<[typeof placement, number]>)
+          .sort((a, b) => b[1] - a[1])[0][0];
+      }
       const minLeft = boundary.left + safe;
       const maxLeft = Math.max(minLeft, boundary.right - safe - width);
-      const left = Math.min(Math.max(anchor.left - width / 2, minLeft), maxLeft);
-      const belowTop = anchor.top + gap;
-      const aboveTop = anchor.top - gap - height;
-      const placement = belowTop + height <= boundary.bottom - safe || aboveTop < boundary.top + safe ? "below" : "above";
-      const desiredTop = placement === "below" ? belowTop : aboveTop;
+      const desiredLeft = placement === "right"
+        ? anchorRight + gap
+        : placement === "left"
+          ? anchor.left - gap - width
+          : anchorCenterX - width / 2;
+      const left = Math.min(Math.max(desiredLeft, minLeft), maxLeft);
+      const desiredTop = placement === "below"
+        ? anchorBottom + gap
+        : placement === "above"
+          ? anchor.top - gap - height
+          : anchorCenterY - height / 2;
       const maxTop = Math.max(boundary.top + safe, boundary.bottom - safe - height);
       const top = Math.min(Math.max(desiredTop, boundary.top + safe), maxTop);
-      const arrowLeft = Math.min(Math.max(anchor.left - left, 18), width - 18);
-      setPosition({ top, left, arrowLeft, placement });
+      const arrowLeft = Math.min(Math.max(anchorCenterX - left, 18), width - 18);
+      const arrowTop = Math.min(Math.max(anchorCenterY - top, 18), height - 18);
+      setPosition({ top, left, arrowLeft, arrowTop, placement });
     };
 
     updatePosition();
@@ -2190,7 +2214,7 @@ function ReaderPopover({
       window.removeEventListener("resize", updatePosition);
       observer.disconnect();
     };
-  }, [anchor.left, anchor.top, boundaryRef]);
+  }, [anchor.bottom, anchor.left, anchor.right, anchor.top, boundaryRef]);
 
   return (
     <div
@@ -2202,7 +2226,8 @@ function ReaderPopover({
         left: `${position?.left ?? anchor.left}px`,
         zIndex: 1000,
         visibility: position ? "visible" : "hidden",
-        ["--popover-arrow-left" as string]: `${position?.arrowLeft ?? 24}px`
+        ["--popover-arrow-left" as string]: `${position?.arrowLeft ?? 24}px`,
+        ["--popover-arrow-top" as string]: `${position?.arrowTop ?? 24}px`
       }}
       onClick={(event) => event.stopPropagation()}
     >
@@ -2279,6 +2304,35 @@ function getHighlightAnchor(
   return {
     top: (boundary.top + boundary.bottom) / 2,
     left: (boundary.left + boundary.right) / 2
+  };
+}
+
+function getRangeAnchor(range: Range, event?: MouseEvent) {
+  const frameRect = range.startContainer.ownerDocument?.defaultView?.frameElement?.getBoundingClientRect();
+  const rects = Array.from(range.getClientRects()).filter((rect) => rect.width > 0 && rect.height > 0);
+  const fallback = range.getBoundingClientRect();
+  const rect = event && rects.length > 0
+    ? rects.reduce((closest, candidate) => {
+        const distance = Math.hypot(
+          event.clientX - Math.min(Math.max(event.clientX, candidate.left), candidate.right),
+          event.clientY - Math.min(Math.max(event.clientY, candidate.top), candidate.bottom)
+        );
+        const closestDistance = Math.hypot(
+          event.clientX - Math.min(Math.max(event.clientX, closest.left), closest.right),
+          event.clientY - Math.min(Math.max(event.clientY, closest.top), closest.bottom)
+        );
+        return distance < closestDistance ? candidate : closest;
+      })
+    : rects.at(-1) ?? fallback;
+  const offsetLeft = frameRect?.left ?? 0;
+  const offsetTop = frameRect?.top ?? 0;
+  return {
+    top: rect.top + offsetTop,
+    left: rect.left + offsetLeft,
+    right: rect.right + offsetLeft,
+    bottom: rect.bottom + offsetTop,
+    width: rect.width,
+    height: rect.height
   };
 }
 
