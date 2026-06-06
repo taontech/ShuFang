@@ -3576,15 +3576,129 @@ h2 {
 
 .highlight-popover-arrow {
   position: absolute;
-  top: -6px;
-  left: 50%;
+  left: var(--popover-arrow-left, 50%);
   transform: translateX(-50%) rotate(45deg);
   width: 12px;
   height: 12px;
   background: rgba(255, 255, 255, 0.94);
-  border-left: 1px solid rgba(15, 23, 42, 0.08);
-  border-top: 1px solid rgba(15, 23, 42, 0.08);
   z-index: -1;
+}
+
+.reader-positioned-popover.below .highlight-popover-arrow {
+  top: -6px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  border-left: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.reader-positioned-popover.above .highlight-popover-arrow {
+  bottom: -6px;
+  border-right: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.footnote-popover {
+  width: min(360px, calc(100vw - 32px));
+  overflow: visible;
+  padding: 14px 16px;
+  color: var(--text);
+  background: rgba(255, 252, 246, 0.97);
+  border: 1px solid rgba(15, 23, 42, 0.1);
+  border-radius: 14px;
+  box-shadow: 0 16px 38px -12px rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.footnote-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.footnote-popover-header .close-btn {
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.footnote-popover-header .close-btn:hover {
+  color: var(--text);
+  background: rgba(15, 23, 42, 0.06);
+}
+
+.footnote-popover p {
+  max-height: min(240px, calc(55vh - 70px));
+  overflow-y: auto;
+  margin: 0;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-line;
+}
+
+.user-note-quote {
+  max-height: 86px;
+  overflow-y: auto;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-family: "Songti SC", STSong, SimSun, serif;
+  font-size: 12px;
+  line-height: 1.6;
+  background: rgba(15, 23, 42, 0.035);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 6px 6px 0;
+}
+
+.user-note-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 12px;
+  padding: 5px 9px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--accent-soft);
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.user-note-edit:hover {
+  filter: brightness(0.96);
+}
+
+.footnote-popover-arrow {
+  position: absolute;
+  left: var(--popover-arrow-left, 50%);
+  z-index: -1;
+  width: 12px;
+  height: 12px;
+  background: rgba(255, 252, 246, 0.97);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.reader-positioned-popover.below .footnote-popover-arrow {
+  top: -6px;
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+  border-left: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.reader-positioned-popover.above .footnote-popover-arrow {
+  bottom: -6px;
+  border-right: 1px solid rgba(15, 23, 42, 0.1);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.1);
 }
 
 /* Sidebar Drawer Bookmark List Customizations for Highlights */
@@ -3773,8 +3887,44 @@ h2 {
 
 .app-shell[data-theme="night"] .highlight-popover-arrow {
   background: rgba(30, 30, 30, 0.94);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.below .highlight-popover-arrow {
   border-left-color: rgba(255, 255, 255, 0.08);
   border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.above .highlight-popover-arrow {
+  border-right-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .footnote-popover {
+  color: rgba(255, 255, 255, 0.94);
+  background: rgba(30, 30, 30, 0.96);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 18px 42px -12px rgba(0, 0, 0, 0.72);
+}
+
+.app-shell[data-theme="night"] .footnote-popover p {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.app-shell[data-theme="night"] .user-note-quote {
+  color: rgba(255, 255, 255, 0.68);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.below .footnote-popover-arrow {
+  background: rgba(30, 30, 30, 0.96);
+  border-top-color: rgba(255, 255, 255, 0.1);
+  border-left-color: rgba(255, 255, 255, 0.1);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.above .footnote-popover-arrow {
+  background: rgba(30, 30, 30, 0.96);
+  border-right-color: rgba(255, 255, 255, 0.1);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
 }
 
 .app-shell[data-theme="night"] .highlight-quote {
@@ -3857,4 +4007,3 @@ h2 {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
 }
-

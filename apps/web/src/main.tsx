@@ -1191,6 +1191,19 @@ function ReaderView({
     left: number;
   } | null>(null);
 
+  const [footnotePopover, setFootnotePopover] = useState<{
+    title: string;
+    text: string;
+    top: number;
+    left: number;
+  } | null>(null);
+
+  const [userNotePopover, setUserNotePopover] = useState<{
+    bookmark: BookmarkItem;
+    top: number;
+    left: number;
+  } | null>(null);
+
   const [reviewQuery, setReviewQuery] = useState("");
   const [reviewResults, setReviewResults] = useState<Array<{ chapterTitle: string; href: string; context: string }>>([]);
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -1232,6 +1245,8 @@ function ReaderView({
     setChapterTitle(isPdf ? "PDF" : book.chapterTitle ?? "");
     setIsReaderReady(false);
     setReaderError("");
+    setFootnotePopover(null);
+    setUserNotePopover(null);
     currentCfiRef.current = book.cfi ?? "";
     locationsReadyRef.current = false;
 
@@ -1277,6 +1292,36 @@ function ReaderView({
       renditionRef.current = rendition;
       applyReaderTheme(rendition, theme, fontSize);
       rendition.hooks.content.register((contents: any) => {
+        contents.document.addEventListener(
+          "click",
+          async (event: MouseEvent) => {
+            const target = event.target as Element | null;
+            const link = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+            if (!link || !isEpubFootnoteReference(link)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+
+            const footnote = await readEpubFootnote(epubBook, contents.document, link.getAttribute("href") ?? "");
+            if (!footnote) return;
+            const iframe = hostRef.current?.querySelector("iframe");
+            if (!iframe) return;
+            const linkRect = link.getBoundingClientRect();
+            const iframeRect = iframe.getBoundingClientRect();
+
+            setSelectionMenu(null);
+            setSelectedHighlight(null);
+            setUserNotePopover(null);
+            setFootnotePopover({
+              title: footnote.title,
+              text: footnote.text,
+              top: linkRect.bottom + iframeRect.top,
+              left: linkRect.left + linkRect.width / 2 + iframeRect.left
+            });
+          },
+          true
+        );
         contents.document.addEventListener("wheel", handleHorizontalWheel, { passive: false });
         contents.document.addEventListener("touchstart", (event: any) => {
           const touch = event.touches[0];
@@ -1357,15 +1402,18 @@ function ReaderView({
           if (!selection || !selection.toString().trim()) {
             setSelectionMenu(null);
             setSelectedHighlight(null);
+            setFootnotePopover(null);
+            setUserNotePopover(null);
           }
         });
       });
 
       await Promise.race([
-        epubBook.ready,
-        new Promise((_, reject) => window.setTimeout(() => reject(new Error("reader_timeout")), 8000))
+        epubBook.opened,
+        new Promise((_, reject) => window.setTimeout(() => reject(new Error("reader_timeout")), 20000))
       ]);
       if (disposed) return;
+      await repairEpubResourceReplacements(epubBook);
       const cacheKey = `shufang.locations.${book.id}`;
       const cachedLocations = window.localStorage.getItem(cacheKey);
       if (cachedLocations) {
@@ -1452,13 +1500,15 @@ function ReaderView({
             bm.cfi,
             { id: bm.id },
             (e: MouseEvent) => {
-              const iframe = hostRef.current?.querySelector("iframe");
-              if (!iframe) return;
-              const iframeRect = iframe.getBoundingClientRect();
-              setSelectedHighlight({
+              const workspaceRect = workspaceRef.current?.getBoundingClientRect();
+              if (!workspaceRect) return;
+              const anchor = getHighlightAnchor(rendition, bm.cfi, e, workspaceRect);
+              setSelectionMenu(null);
+              setFootnotePopover(null);
+              setSelectedHighlight(null);
+              setUserNotePopover({
                 bookmark: bm,
-                top: e.clientY + iframeRect.top,
-                left: e.clientX + iframeRect.left
+                ...anchor
               });
             },
             "epubjs-highlight",
@@ -1480,9 +1530,11 @@ function ReaderView({
   useEffect(() => {
     const handleGlobalClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest(".selection-toolbar") && !target.closest(".highlight-popover")) {
+      if (!target.closest(".selection-toolbar") && !target.closest(".highlight-popover") && !target.closest(".footnote-popover")) {
         setSelectionMenu(null);
         setSelectedHighlight(null);
+        setFootnotePopover(null);
+        setUserNotePopover(null);
       }
     };
     document.addEventListener("click", handleGlobalClick);
@@ -1907,16 +1959,11 @@ function ReaderView({
 
       {/* Floating Highlight & Annotation Editor */}
       {selectedHighlight && (
-        <div
+        <ReaderPopover
+          anchor={selectedHighlight}
+          boundaryRef={workspaceRef}
           className="highlight-popover"
-          style={{
-            position: "absolute",
-            top: `${selectedHighlight.top + 24}px`,
-            left: `${selectedHighlight.left}px`,
-            transform: "translateX(-50%)",
-            zIndex: 1000
-          }}
-          onClick={(e) => e.stopPropagation()}
+          arrowClassName="highlight-popover-arrow"
         >
           <div className="highlight-popover-inner">
             <div className="highlight-popover-header">
@@ -2029,11 +2076,189 @@ function ReaderView({
               )}
             </div>
           </div>
-          <div className="highlight-popover-arrow" />
-        </div>
+        </ReaderPopover>
+      )}
+
+      {userNotePopover && (
+        <ReaderPopover anchor={userNotePopover} boundaryRef={workspaceRef} className="footnote-popover user-note-popover">
+          <div className="footnote-popover-header">
+            <strong>我的备注</strong>
+            <button className="close-btn" onClick={() => setUserNotePopover(null)} aria-label="关闭备注">
+              <X size={14} />
+            </button>
+          </div>
+          <blockquote className="user-note-quote">{userNotePopover.bookmark.title}</blockquote>
+          <p>{userNotePopover.bookmark.note || "暂无备注"}</p>
+          <button
+            className="user-note-edit"
+            onClick={() => {
+              setSelectedHighlight(userNotePopover);
+              setUserNotePopover(null);
+            }}
+          >
+            <Edit3 size={13} />
+            编辑备注
+          </button>
+        </ReaderPopover>
+      )}
+
+      {footnotePopover && (
+        <ReaderPopover anchor={footnotePopover} boundaryRef={workspaceRef} className="footnote-popover">
+          <div className="footnote-popover-header">
+            <strong>{footnotePopover.title}</strong>
+            <button className="close-btn" onClick={() => setFootnotePopover(null)} aria-label="关闭注解">
+              <X size={14} />
+            </button>
+          </div>
+          <p>{footnotePopover.text}</p>
+        </ReaderPopover>
       )}
     </div>
   );
+}
+
+function ReaderPopover({
+  anchor,
+  boundaryRef,
+  className,
+  arrowClassName = "footnote-popover-arrow",
+  children
+}: {
+  anchor: { top: number; left: number };
+  boundaryRef: React.RefObject<HTMLElement>;
+  className: string;
+  arrowClassName?: string;
+  children: React.ReactNode;
+}) {
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [position, setPosition] = useState<{ top: number; left: number; arrowLeft: number; placement: "above" | "below" } | null>(null);
+
+  useEffect(() => {
+    const updatePosition = () => {
+      const popover = popoverRef.current;
+      if (!popover) return;
+      const boundary = boundaryRef.current?.getBoundingClientRect() ?? {
+        top: 0,
+        left: 0,
+        right: window.innerWidth,
+        bottom: window.innerHeight
+      };
+      const width = popover.offsetWidth;
+      const height = popover.offsetHeight;
+      const safe = 12;
+      const gap = 10;
+      const minLeft = boundary.left + safe;
+      const maxLeft = Math.max(minLeft, boundary.right - safe - width);
+      const left = Math.min(Math.max(anchor.left - width / 2, minLeft), maxLeft);
+      const belowTop = anchor.top + gap;
+      const aboveTop = anchor.top - gap - height;
+      const placement = belowTop + height <= boundary.bottom - safe || aboveTop < boundary.top + safe ? "below" : "above";
+      const desiredTop = placement === "below" ? belowTop : aboveTop;
+      const maxTop = Math.max(boundary.top + safe, boundary.bottom - safe - height);
+      const top = Math.min(Math.max(desiredTop, boundary.top + safe), maxTop);
+      const arrowLeft = Math.min(Math.max(anchor.left - left, 18), width - 18);
+      setPosition({ top, left, arrowLeft, placement });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    const observer = new ResizeObserver(updatePosition);
+    if (popoverRef.current) observer.observe(popoverRef.current);
+    if (boundaryRef.current) observer.observe(boundaryRef.current);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      observer.disconnect();
+    };
+  }, [anchor.left, anchor.top, boundaryRef]);
+
+  return (
+    <div
+      ref={popoverRef}
+      className={`${className} reader-positioned-popover ${position?.placement ?? "below"}`}
+      style={{
+        position: "fixed",
+        top: `${position?.top ?? anchor.top}px`,
+        left: `${position?.left ?? anchor.left}px`,
+        zIndex: 1000,
+        visibility: position ? "visible" : "hidden",
+        ["--popover-arrow-left" as string]: `${position?.arrowLeft ?? 24}px`
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {children}
+      <div className={arrowClassName} />
+    </div>
+  );
+}
+
+function getHighlightAnchor(
+  rendition: Rendition,
+  cfi: string,
+  event: MouseEvent,
+  boundary: DOMRect
+): { top: number; left: number } {
+  const safe = 12;
+  const clampToBoundary = (point: { top: number; left: number }) => ({
+    top: Math.min(Math.max(point.top, boundary.top + safe), boundary.bottom - safe),
+    left: Math.min(Math.max(point.left, boundary.left + safe), boundary.right - safe)
+  });
+  const isInBoundary = (point: { top: number; left: number }) =>
+    point.left >= boundary.left &&
+    point.left <= boundary.right &&
+    point.top >= boundary.top &&
+    point.top <= boundary.bottom;
+  const pointFromFrame = (
+    frame: Element | null | undefined,
+    point: { top: number; left: number }
+  ) => {
+    if (!frame) return point;
+    const frameRect = frame.getBoundingClientRect();
+    return { top: point.top + frameRect.top, left: point.left + frameRect.left };
+  };
+
+  const target = event.currentTarget instanceof Element
+    ? event.currentTarget
+    : event.target instanceof Element
+      ? event.target
+      : null;
+  const eventFrame = target?.ownerDocument.defaultView?.frameElement;
+  const eventPoint = pointFromFrame(eventFrame, { top: event.clientY, left: event.clientX });
+  if (isInBoundary(eventPoint)) return clampToBoundary(eventPoint);
+
+  try {
+    const range = rendition.getRange(cfi);
+    const rangeFrame = range?.startContainer.ownerDocument?.defaultView?.frameElement;
+    const visibleRects = Array.from(range?.getClientRects() ?? [])
+      .map((rect) => {
+        const topLeft = pointFromFrame(rangeFrame, { top: rect.top, left: rect.left });
+        return {
+          top: topLeft.top,
+          left: topLeft.left,
+          right: topLeft.left + rect.width,
+          bottom: topLeft.top + rect.height
+        };
+      })
+      .filter((rect) =>
+        rect.right >= boundary.left &&
+        rect.left <= boundary.right &&
+        rect.bottom >= boundary.top &&
+        rect.top <= boundary.bottom
+      );
+    const rect = visibleRects[0];
+    if (rect) {
+      return clampToBoundary({
+        top: (rect.top + rect.bottom) / 2,
+        left: (rect.left + rect.right) / 2
+      });
+    }
+  } catch (error) {
+    console.warn("Failed to locate highlight range:", error);
+  }
+
+  return {
+    top: (boundary.top + boundary.bottom) / 2,
+    left: (boundary.left + boundary.right) / 2
+  };
 }
 
 function ReaderDrawer({
@@ -3600,12 +3825,93 @@ async function loadBookmarks(bookId: string, userId: string, setBookmarks: (item
   setBookmarks(items);
 }
 
+function isEpubFootnoteReference(link: HTMLAnchorElement) {
+  const epubType = link.getAttribute("epub:type") ?? link.getAttributeNS("http://www.idpf.org/2007/ops", "type") ?? "";
+  const role = link.getAttribute("role") ?? "";
+  return (
+    epubType.split(/\s+/).includes("noteref") ||
+    role === "doc-noteref" ||
+    link.matches(".duokan-footnote, .noteref, .footnote-ref, .note-ref") ||
+    Boolean(link.closest("sup"))
+  );
+}
+
+function readFootnoteFromDocument(document: Document, href: string) {
+  const hashIndex = href.indexOf("#");
+  if (hashIndex === -1) return null;
+  const rawId = href.slice(hashIndex + 1);
+  if (!rawId) return null;
+
+  let id = rawId;
+  try {
+    id = decodeURIComponent(rawId);
+  } catch {
+    // Keep the original fragment when an EPUB contains malformed escaping.
+  }
+
+  const target = document.getElementById(id);
+  if (!target) return null;
+  const paragraphs = Array.from(target.querySelectorAll("p"))
+    .map((paragraph) => paragraph.textContent?.replace(/\s+/g, " ").trim() ?? "")
+    .filter(Boolean);
+  const text = (paragraphs.length ? paragraphs.join("\n\n") : target.textContent?.replace(/\s+/g, " ").trim()) ?? "";
+  if (!text) return null;
+  return { title: "注解", text };
+}
+
+async function readEpubFootnote(book: EpubBook, document: Document, href: string) {
+  const localFootnote = readFootnoteFromDocument(document, href);
+  if (localFootnote || !href.includes("#") || href.startsWith("#")) return localFootnote;
+
+  try {
+    const base = document.querySelector("base")?.href || document.baseURI;
+    const absolute = new URL(href, base).href;
+    const relative = (book as any).path.relative(absolute).split("#")[0];
+    const targetDocument = (await (book as any).load(relative)) as Document;
+    return readFootnoteFromDocument(targetDocument, href);
+  } catch {
+    return null;
+  }
+}
+
+async function repairEpubResourceReplacements(book: EpubBook) {
+  const resources = (book as any).resources;
+  if (!resources?.urls?.length || !resources.settings?.resolver) return;
+
+  const replacements = await Promise.all(
+    resources.urls.map(async (url: string) => {
+      try {
+        return await resources.createUrl(resources.settings.resolver(url));
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  // epub.js 0.3.93 filters failed resources and shifts every later URL out of
+  // alignment. Preserve null entries so one missing asset cannot replace others.
+  resources.replacementUrls = replacements;
+  await resources.replaceCss();
+}
+
 function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) {
+  const semanticSelectors = {
+    headings: "h1, h2, h3, h4, h5, h6",
+    notes:
+      "aside, [role='doc-footnote'], [role='doc-endnote'], [epub\\:type~='footnote'], [epub\\:type~='endnote'], [epub\\:type~='annotation'], .note, .notes, .annotation, .comment, .commentary, .footnote, .footnotes, .endnote, .endnotes, .remark, .remarks, .zhu, .zhushi, .duokan-footnote-content, .duokan-footnote-item",
+    noteMarkers:
+      "a[role='doc-noteref'], a[epub\\:type~='noteref'], sup, .noteref, .footnote-ref, .note-ref, .duokan-footnote",
+    commentaryBlocks: ".zp, .criticism, .commentary-block, .review-note",
+    inlineCommentary: ".pz, .marginnote, .sidenote, .annotation-inline, .commentary-inline",
+    commentaryLabels: ".zp1, .commentary-label",
+    verse: "[epub\\:type~='poem'], .poem, .poetry, .verse"
+  };
+
   rendition.themes.register("shufang-day", {
     "html, body": {
       color: "#2f2923",
       background: "#fbf4e9",
-      "font-family": "Georgia, 'Songti SC', serif",
+      "font-family": "'Songti SC', STSong, SimSun, Georgia, serif",
       "line-height": "1.72",
       "font-size": `${fontSize}px`,
       "user-select": "text !important",
@@ -3615,10 +3921,82 @@ function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) 
       margin: "0 !important",
       padding: "0 4% !important"
     },
-    "body *": { color: "#2f2923 !important", "background-color": "transparent !important", "user-select": "text !important", "-webkit-user-select": "text !important" },
+    "body *": {
+      color: "inherit !important",
+      "background-color": "transparent !important",
+      "font-family": "inherit !important",
+      "user-select": "text !important",
+      "-webkit-user-select": "text !important"
+    },
     "p, div": { "line-height": "1.72" },
+    [semanticSelectors.headings]: {
+      color: "#244c46 !important",
+      "font-family": "'Songti SC', STSong, SimSun, Georgia, serif !important",
+      "font-weight": "700",
+      "line-height": "1.35"
+    },
+    "blockquote": {
+      color: "#64584c !important",
+      "background-color": "rgba(42, 130, 120, 0.07) !important",
+      "border-left": "3px solid #86afa8",
+      margin: "1.25em 0",
+      padding: "0.7em 1em",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important",
+      "line-height": "1.68"
+    },
+    "q, cite": {
+      color: "#546f69 !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    [semanticSelectors.notes]: {
+      color: "#765d31 !important",
+      "background-color": "rgba(241, 189, 101, 0.13) !important",
+      border: "1px solid rgba(185, 134, 57, 0.28)",
+      "border-radius": "5px",
+      margin: "1em 0",
+      padding: "0.65em 0.85em",
+      "font-family": "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important",
+      "font-size": "0.86em",
+      "line-height": "1.62"
+    },
+    [semanticSelectors.noteMarkers]: {
+      color: "#a56328 !important",
+      "font-family": "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important",
+      "font-size": "0.78em",
+      "font-weight": "700"
+    },
+    [semanticSelectors.commentaryBlocks]: {
+      color: "#486b65 !important",
+      "border-top": "1px solid rgba(72, 107, 101, 0.24)",
+      "border-bottom": "1px solid rgba(72, 107, 101, 0.24)",
+      margin: "1.5em 0",
+      padding: "0.8em 0.35em",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    [semanticSelectors.inlineCommentary]: {
+      color: "#9a5634 !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important",
+      "font-size": "0.84em",
+      "line-height": "1.55"
+    },
+    [semanticSelectors.commentaryLabels]: {
+      color: "#fffaf0 !important",
+      "background-color": "#55766f !important",
+      "border-color": "#55766f !important",
+      "border-radius": "2px",
+      padding: "0 0.15em"
+    },
+    [semanticSelectors.verse]: {
+      color: "#53645f !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    "pre, code, kbd, samp": {
+      color: "#6c4e31 !important",
+      "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace !important"
+    },
     img: { "max-width": "100% !important", "height": "auto !important" },
     a: { color: "#2a8278 !important" },
+    hr: { border: "0", "border-top": "1px solid rgba(47, 41, 35, 0.2)" },
     "::selection": {
       background: "rgba(241, 189, 101, 0.4) !important"
     }
@@ -3627,7 +4005,7 @@ function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) 
     "html, body": {
       color: "#efe3d0",
       background: "#171615",
-      "font-family": "Georgia, 'Songti SC', serif",
+      "font-family": "'Songti SC', STSong, SimSun, Georgia, serif",
       "line-height": "1.72",
       "font-size": `${fontSize}px`,
       "user-select": "text !important",
@@ -3637,10 +4015,82 @@ function applyReaderTheme(rendition: Rendition, theme: Theme, fontSize: number) 
       margin: "0 !important",
       padding: "0 4% !important"
     },
-    "body *": { color: "#efe3d0 !important", "background-color": "transparent !important", "user-select": "text !important", "-webkit-user-select": "text !important" },
+    "body *": {
+      color: "inherit !important",
+      "background-color": "transparent !important",
+      "font-family": "inherit !important",
+      "user-select": "text !important",
+      "-webkit-user-select": "text !important"
+    },
     "p, div": { "line-height": "1.72" },
+    [semanticSelectors.headings]: {
+      color: "#b8ddd6 !important",
+      "font-family": "'Songti SC', STSong, SimSun, Georgia, serif !important",
+      "font-weight": "700",
+      "line-height": "1.35"
+    },
+    "blockquote": {
+      color: "#d3c5b3 !important",
+      "background-color": "rgba(121, 217, 203, 0.08) !important",
+      "border-left": "3px solid #567f78",
+      margin: "1.25em 0",
+      padding: "0.7em 1em",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important",
+      "line-height": "1.68"
+    },
+    "q, cite": {
+      color: "#a8cbc5 !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    [semanticSelectors.notes]: {
+      color: "#e4c990 !important",
+      "background-color": "rgba(241, 189, 101, 0.08) !important",
+      border: "1px solid rgba(228, 201, 144, 0.2)",
+      "border-radius": "5px",
+      margin: "1em 0",
+      padding: "0.65em 0.85em",
+      "font-family": "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important",
+      "font-size": "0.86em",
+      "line-height": "1.62"
+    },
+    [semanticSelectors.noteMarkers]: {
+      color: "#e5ad6b !important",
+      "font-family": "-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif !important",
+      "font-size": "0.78em",
+      "font-weight": "700"
+    },
+    [semanticSelectors.commentaryBlocks]: {
+      color: "#a8cbc5 !important",
+      "border-top": "1px solid rgba(168, 203, 197, 0.2)",
+      "border-bottom": "1px solid rgba(168, 203, 197, 0.2)",
+      margin: "1.5em 0",
+      padding: "0.8em 0.35em",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    [semanticSelectors.inlineCommentary]: {
+      color: "#e4a37d !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important",
+      "font-size": "0.84em",
+      "line-height": "1.55"
+    },
+    [semanticSelectors.commentaryLabels]: {
+      color: "#fff7e9 !important",
+      "background-color": "#496d67 !important",
+      "border-color": "#496d67 !important",
+      "border-radius": "2px",
+      padding: "0 0.15em"
+    },
+    [semanticSelectors.verse]: {
+      color: "#b4cbc6 !important",
+      "font-family": "'Kaiti SC', STKaiti, KaiTi, Georgia, serif !important"
+    },
+    "pre, code, kbd, samp": {
+      color: "#dab68b !important",
+      "font-family": "ui-monospace, SFMono-Regular, Menlo, monospace !important"
+    },
     img: { "max-width": "100% !important", "height": "auto !important" },
     a: { color: "#79d9cb !important" },
+    hr: { border: "0", "border-top": "1px solid rgba(239, 227, 208, 0.2)" },
     "::selection": {
       background: "rgba(121, 217, 203, 0.4) !important"
     }
