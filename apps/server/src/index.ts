@@ -380,8 +380,20 @@ app.get<{ Querystring: { userId?: string; bookId?: string } }>("/api/bookmarks",
 app.post<{
   Body: { userId: string; bookId: string; cfi: string; title?: string; note?: string; color?: string };
 }>("/api/bookmarks", async (request) => {
-  const id = randomUUID();
   const { userId, bookId, cfi, title, note, color } = request.body;
+  const existing = db
+    .prepare("SELECT id FROM bookmarks WHERE user_id = ? AND book_id = ? AND cfi = ? ORDER BY created_at DESC LIMIT 1")
+    .get(userId, bookId, cfi) as { id: string } | undefined;
+  if (existing) {
+    db.prepare("UPDATE bookmarks SET title = ?, note = ?, color = ? WHERE id = ?").run(
+      title ?? null,
+      note ?? null,
+      color ?? null,
+      existing.id
+    );
+    return { id: existing.id, userId, bookId, cfi, title: title ?? null, note: note ?? null, color: color ?? null };
+  }
+  const id = randomUUID();
   db.prepare(
     "INSERT INTO bookmarks (id, user_id, book_id, cfi, title, note, color) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).run(id, userId, bookId, cfi, title ?? null, note ?? null, color ?? null);
@@ -389,17 +401,37 @@ app.post<{
 });
 
 app.delete<{ Params: { bookmarkId: string } }>("/api/bookmarks/:bookmarkId", async (request) => {
-  db.prepare("DELETE FROM bookmarks WHERE id = ?").run(request.params.bookmarkId);
+  const bookmark = db
+    .prepare("SELECT user_id AS userId, book_id AS bookId, cfi FROM bookmarks WHERE id = ?")
+    .get(request.params.bookmarkId) as { userId: string; bookId: string; cfi: string } | undefined;
+  if (bookmark) {
+    db.prepare("DELETE FROM bookmarks WHERE user_id = ? AND book_id = ? AND cfi = ?").run(
+      bookmark.userId,
+      bookmark.bookId,
+      bookmark.cfi
+    );
+  }
   return { ok: true };
 });
 
 app.put<{
   Params: { bookmarkId: string };
-  Body: { note?: string; color?: string };
+  Body: { note?: string | null; color?: string | null };
 }>("/api/bookmarks/:bookmarkId", async (request) => {
   const { bookmarkId } = request.params;
-  const { note, color } = request.body;
-  db.prepare("UPDATE bookmarks SET note = ?, color = ? WHERE id = ?").run(note ?? null, color ?? null, bookmarkId);
+  const updates: string[] = [];
+  const values: Array<string | null> = [];
+  if (Object.prototype.hasOwnProperty.call(request.body, "note")) {
+    updates.push("note = ?");
+    values.push(request.body.note ?? null);
+  }
+  if (Object.prototype.hasOwnProperty.call(request.body, "color")) {
+    updates.push("color = ?");
+    values.push(request.body.color ?? null);
+  }
+  if (updates.length > 0) {
+    db.prepare(`UPDATE bookmarks SET ${updates.join(", ")} WHERE id = ?`).run(...values, bookmarkId);
+  }
   return { ok: true };
 });
 

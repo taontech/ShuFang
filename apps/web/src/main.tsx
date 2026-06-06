@@ -47,6 +47,7 @@ import "./styles/app.css";
 
 const API_BASE = resolveApiBase();
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const HIGHLIGHT_COLORS = ["#f1bd65", "#52c41a", "#1890ff", "#ff4d4f"];
 
 type View = "home" | "books" | "reader" | "music" | "podcasts" | "settings";
 type Theme = "night" | "day";
@@ -1159,6 +1160,7 @@ function ReaderView({
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const renditionRef = useRef<Rendition | null>(null);
   const epubBookRef = useRef<EpubBook | null>(null);
+  const renderedHighlightsRef = useRef(new Map<string, string>());
   const saveTimerRef = useRef<number | null>(null);
   const wheelLockRef = useRef(false);
   const touchStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -1257,6 +1259,7 @@ function ReaderView({
       epubBookRef.current?.destroy();
       renditionRef.current = null;
       epubBookRef.current = null;
+      renderedHighlightsRef.current.clear();
       return () => {
         disposed = true;
       };
@@ -1482,27 +1485,37 @@ function ReaderView({
     const rendition = renditionRef.current;
     if (!rendition || !isReaderReady || isPdf) return;
 
-    // Remove existing highlight annotations to avoid duplicates
-    bookmarks.forEach((bm) => {
-      if (bm.cfi) {
-        try {
-          rendition.annotations.remove(bm.cfi, "highlight");
-        } catch (e) {}
+    const nextHighlights = new Map<string, BookmarkItem>();
+    bookmarks.forEach((bookmark) => {
+      if (bookmark.cfi?.includes(",") && !nextHighlights.has(bookmark.cfi)) {
+        nextHighlights.set(bookmark.cfi, bookmark);
       }
     });
 
-    // Add current highlights
-    bookmarks.forEach((bm) => {
-      if (bm.cfi && bm.cfi.includes(",")) {
+    renderedHighlightsRef.current.forEach((signature, cfi) => {
+      const next = nextHighlights.get(cfi);
+      if (!next || highlightSignature(next) !== signature) {
+        try {
+          rendition.annotations.remove(cfi, "highlight");
+        } catch (error) {
+          console.warn("Failed to remove highlight:", error);
+        }
+        renderedHighlightsRef.current.delete(cfi);
+      }
+    });
+
+    nextHighlights.forEach((bm, cfi) => {
+      const signature = highlightSignature(bm);
+      if (!renderedHighlightsRef.current.has(cfi)) {
         try {
           rendition.annotations.add(
             "highlight",
-            bm.cfi,
+            cfi,
             { id: bm.id },
             (e: MouseEvent) => {
               const workspaceRect = workspaceRef.current?.getBoundingClientRect();
               if (!workspaceRect) return;
-              const anchor = getHighlightAnchor(rendition, bm.cfi, e, workspaceRect);
+              const anchor = getHighlightAnchor(rendition, cfi, e, workspaceRect);
               setSelectionMenu(null);
               setFootnotePopover(null);
               setSelectedHighlight(null);
@@ -1513,12 +1526,13 @@ function ReaderView({
             },
             "epubjs-highlight",
             {
-              fill: bm.color || "rgba(241, 189, 101, 0.38)",
-              "fill-opacity": "0.38",
+              fill: highlightFillColor(bm.color),
+              "fill-opacity": "0.3",
               "mix-blend-mode": "multiply",
               "cursor": "pointer"
             }
           );
+          renderedHighlightsRef.current.set(cfi, signature);
         } catch (err) {
           console.error("Failed to render highlight:", err);
         }
@@ -1850,7 +1864,7 @@ function ReaderView({
         >
           <div className="selection-toolbar-inner">
             <div className="color-selectors">
-              {["rgba(241, 189, 101, 0.38)", "#52c41a", "#1890ff", "#ff4d4f"].map((color) => (
+              {HIGHLIGHT_COLORS.map((color) => (
                 <button
                   key={color}
                   className="color-dot"
@@ -2007,8 +2021,7 @@ function ReaderView({
                     await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
                       method: "PUT",
                       body: JSON.stringify({
-                        note: noteVal || null,
-                        color: selectedHighlight.bookmark.color
+                        note: noteVal || null
                       })
                     });
                   }
@@ -2019,11 +2032,12 @@ function ReaderView({
 
             <div className="popover-footer">
               <div className="color-dots-row">
-                {["rgba(241, 189, 101, 0.38)", "#52c41a", "#1890ff", "#ff4d4f"].map((color) => (
+                {HIGHLIGHT_COLORS.map((color) => (
                   <button
                     key={color}
                     className={`color-dot ${selectedHighlight.bookmark.color === color ? "active" : ""}`}
                     style={{ backgroundColor: color }}
+                    onMouseDown={(event) => event.preventDefault()}
                     onClick={async () => {
                       const isTemp = selectedHighlight.bookmark.id.startsWith("temp-");
                       if (isTemp) {
@@ -2035,10 +2049,16 @@ function ReaderView({
                           }
                         });
                       } else {
+                        setSelectedHighlight({
+                          ...selectedHighlight,
+                          bookmark: {
+                            ...selectedHighlight.bookmark,
+                            color
+                          }
+                        });
                         await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
                           method: "PUT",
                           body: JSON.stringify({
-                            note: selectedHighlight.bookmark.note,
                             color
                           })
                         });
@@ -2053,6 +2073,7 @@ function ReaderView({
                 <button
                   className="delete-btn"
                   title="删除"
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={async () => {
                     await api(`/api/bookmarks/${selectedHighlight.bookmark.id}`, {
                       method: "DELETE"
@@ -2259,6 +2280,16 @@ function getHighlightAnchor(
     top: (boundary.top + boundary.bottom) / 2,
     left: (boundary.left + boundary.right) / 2
   };
+}
+
+function highlightSignature(bookmark: BookmarkItem) {
+  return JSON.stringify([bookmark.id, bookmark.title, bookmark.note, bookmark.color]);
+}
+
+function highlightFillColor(color: string | null) {
+  const value = color?.trim() || HIGHLIGHT_COLORS[0];
+  const rgba = value.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  return rgba ? `rgb(${rgba[1]}, ${rgba[2]}, ${rgba[3]})` : value;
 }
 
 function ReaderDrawer({
