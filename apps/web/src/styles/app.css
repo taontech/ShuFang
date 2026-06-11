@@ -3592,6 +3592,8 @@ h2 {
   transform: translateX(-50%) rotate(45deg);
   border-top: 1px solid rgba(15, 23, 42, 0.08);
   border-left: 1px solid rgba(15, 23, 42, 0.08);
+  border-right: none;
+  border-bottom: none;
 }
 
 .reader-positioned-popover.above :is(.selection-toolbar-arrow, .highlight-popover-arrow, .footnote-popover-arrow) {
@@ -3600,6 +3602,8 @@ h2 {
   bottom: -6px;
   left: var(--popover-arrow-left, 50%);
   transform: translateX(-50%) rotate(45deg);
+  border-top: none;
+  border-left: none;
   border-right: 1px solid rgba(15, 23, 42, 0.08);
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
@@ -3610,8 +3614,10 @@ h2 {
   bottom: auto;
   left: -6px;
   transform: translateY(-50%) rotate(45deg);
-  border-top: 1px solid rgba(15, 23, 42, 0.08);
+  border-top: none;
+  border-right: none;
   border-left: 1px solid rgba(15, 23, 42, 0.08);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .reader-positioned-popover.left :is(.selection-toolbar-arrow, .highlight-popover-arrow, .footnote-popover-arrow) {
@@ -3620,8 +3626,10 @@ h2 {
   bottom: auto;
   left: auto;
   transform: translateY(-50%) rotate(45deg);
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
   border-right: 1px solid rgba(15, 23, 42, 0.08);
-  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  border-left: none;
+  border-bottom: none;
 }
 
 .footnote-popover {
@@ -3877,8 +3885,6 @@ h2 {
 
 .app-shell[data-theme="night"] .selection-toolbar-arrow {
   background: rgba(30, 30, 30, 0.88);
-  border-right-color: rgba(255, 255, 255, 0.08);
-  border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
 .app-shell[data-theme="night"] .toolbar-btn {
@@ -3905,14 +3911,25 @@ h2 {
   background: rgba(30, 30, 30, 0.94);
 }
 
-.app-shell[data-theme="night"] .reader-positioned-popover.below .highlight-popover-arrow {
-  border-left-color: rgba(255, 255, 255, 0.08);
+/* Night Mode border colors for selection toolbar and highlight popover arrows */
+.app-shell[data-theme="night"] .reader-positioned-popover.below :is(.selection-toolbar-arrow, .highlight-popover-arrow) {
   border-top-color: rgba(255, 255, 255, 0.08);
+  border-left-color: rgba(255, 255, 255, 0.08);
 }
 
-.app-shell[data-theme="night"] .reader-positioned-popover.above .highlight-popover-arrow {
+.app-shell[data-theme="night"] .reader-positioned-popover.above :is(.selection-toolbar-arrow, .highlight-popover-arrow) {
   border-right-color: rgba(255, 255, 255, 0.08);
   border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.right :is(.selection-toolbar-arrow, .highlight-popover-arrow) {
+  border-left-color: rgba(255, 255, 255, 0.08);
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.left :is(.selection-toolbar-arrow, .highlight-popover-arrow) {
+  border-top-color: rgba(255, 255, 255, 0.08);
+  border-right-color: rgba(255, 255, 255, 0.08);
 }
 
 .app-shell[data-theme="night"] .footnote-popover {
@@ -3941,6 +3958,18 @@ h2 {
   background: rgba(30, 30, 30, 0.96);
   border-right-color: rgba(255, 255, 255, 0.1);
   border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.right .footnote-popover-arrow {
+  background: rgba(30, 30, 30, 0.96);
+  border-left-color: rgba(255, 255, 255, 0.1);
+  border-bottom-color: rgba(255, 255, 255, 0.1);
+}
+
+.app-shell[data-theme="night"] .reader-positioned-popover.left .footnote-popover-arrow {
+  background: rgba(30, 30, 30, 0.96);
+  border-top-color: rgba(255, 255, 255, 0.1);
+  border-right-color: rgba(255, 255, 255, 0.1);
 }
 
 .app-shell[data-theme="night"] .highlight-quote {
