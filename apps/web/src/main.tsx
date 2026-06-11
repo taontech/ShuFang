@@ -1547,7 +1547,7 @@ function ReaderView({
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
         const rendition = renditionRef.current;
-        if (!rendition || !hostRef.current) return;
+        if (!rendition || !(rendition as any).manager || !hostRef.current) return;
         const nextSpread = readerSpreadForElement(hostRef.current);
         rendition.spread(nextSpread, 860);
         rendition.resize(hostRef.current.clientWidth, hostRef.current.clientHeight);
