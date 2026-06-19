@@ -8,13 +8,14 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @shufang/web",
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @shufang/server\" \"npm run dev -w @shufang/web\"",
     "dev:web": "npm run dev -w @shufang/web",
     "dev:server": "npm run dev -w @shufang/server",
     "build": "npm run build -w @shufang/web && npm run build -w @shufang/server",
     "typecheck": "npm run typecheck -w @shufang/web && npm run typecheck -w @shufang/server"
   },
   "devDependencies": {
+    "concurrently": "^10.0.3",
     "typescript": "^5.5.4"
   }
 }
